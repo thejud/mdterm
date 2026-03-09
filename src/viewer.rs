@@ -14,6 +14,7 @@ use crossterm::{
     },
 };
 
+use crate::markdown::SyntectRes;
 use crate::style::{DocumentInfo, Line, LineMeta, StyledSpan, wrap_lines};
 use crate::theme::Theme;
 
@@ -46,6 +47,9 @@ pub fn run(opts: ViewerOptions) -> io::Result<()> {
 
         render_frame(&mut stdout, &state)?;
 
+        // Clear transient status after rendering so it shows for one frame
+        state.status_msg = None;
+
         let timeout = if state.follow_mode {
             Duration::from_millis(500)
         } else {
@@ -60,11 +64,6 @@ pub fn run(opts: ViewerOptions) -> io::Result<()> {
         } else if state.follow_mode {
             state.check_file_changed();
         }
-
-        // Clear transient status
-        if state.status_msg.is_some() {
-            state.status_msg = None;
-        }
     }
 
     Ok(())
@@ -75,6 +74,16 @@ pub fn print_lines(lines: &[Line]) {
     for line in lines {
         for span in &line.spans {
             let _ = write_span(&mut stdout, span, None);
+        }
+        let _ = writeln!(stdout);
+    }
+}
+
+pub fn print_lines_plain(lines: &[Line]) {
+    let mut stdout = io::stdout();
+    for line in lines {
+        for span in &line.spans {
+            let _ = write!(stdout, "{}", span.text);
         }
         let _ = writeln!(stdout);
     }
@@ -120,11 +129,14 @@ struct ViewerState {
     cols: u16,
     rows: u16,
 
+    // Syntect resources (loaded once)
+    syntect_res: SyntectRes,
+
     // Options
     slide_mode: bool,
     follow_mode: bool,
     line_numbers: bool,
-    _width_override: Option<usize>,
+    width_override: Option<usize>,
 
     // Mode
     mode: ViewMode,
@@ -199,10 +211,11 @@ impl ViewerState {
             offset: 0,
             cols,
             rows,
+            syntect_res: SyntectRes::load(),
             slide_mode: opts.slide_mode,
             follow_mode: opts.follow_mode,
             line_numbers: opts.line_numbers,
-            _width_override: opts.width_override,
+            width_override: opts.width_override,
             mode: ViewMode::Normal,
             search: SearchState::new(),
             toc_entries: Vec::new(),
@@ -220,7 +233,11 @@ impl ViewerState {
     }
 
     fn content_width(&self) -> usize {
-        (self.cols as usize).saturating_sub(4)
+        if let Some(w) = self.width_override {
+            w.saturating_sub(4)
+        } else {
+            (self.cols as usize).saturating_sub(4)
+        }
     }
 
     fn viewport(&self) -> usize {
@@ -236,8 +253,13 @@ impl ViewerState {
 
     fn rebuild(&mut self) {
         let cw = self.content_width();
-        let (lines, doc_info) =
-            crate::markdown::render(&self.content, cw, &self.theme, self.line_numbers);
+        let (lines, doc_info) = crate::markdown::render_with(
+            &self.content,
+            cw,
+            &self.theme,
+            self.line_numbers,
+            &self.syntect_res,
+        );
         self.wrapped = wrap_lines(&lines, cw);
         self.doc_info = doc_info;
 
@@ -255,10 +277,11 @@ impl ViewerState {
 
         // Build link list
         self.link_entries.clear();
+        let mut seen_urls = std::collections::HashSet::new();
         for line in &self.wrapped {
             for span in &line.spans {
                 if let Some(ref url) = span.style.link_url
-                    && !self.link_entries.iter().any(|l| l.url == *url)
+                    && seen_urls.insert(url.clone())
                 {
                     let text = span.text.trim().to_string();
                     self.link_entries.push(LinkEntry {

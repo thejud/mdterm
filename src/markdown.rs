@@ -54,9 +54,9 @@ struct Renderer<'a> {
     // Document info
     code_blocks: Vec<CodeBlockContent>,
 
-    // Syntect (loaded once)
-    syntax_set: SyntaxSet,
-    theme_set: ThemeSet,
+    // Syntect (shared reference)
+    syntax_set: &'a SyntaxSet,
+    theme_set: &'a ThemeSet,
 }
 
 #[derive(Clone)]
@@ -66,7 +66,13 @@ enum ListKind {
 }
 
 impl<'a> Renderer<'a> {
-    fn new(width: usize, theme: &'a Theme, line_numbers: bool) -> Self {
+    fn new(
+        width: usize,
+        theme: &'a Theme,
+        line_numbers: bool,
+        syntax_set: &'a SyntaxSet,
+        theme_set: &'a ThemeSet,
+    ) -> Self {
         Renderer {
             theme,
             lines: Vec::new(),
@@ -98,8 +104,8 @@ impl<'a> Renderer<'a> {
             image_url: String::new(),
             image_alt: String::new(),
             code_blocks: Vec::new(),
-            syntax_set: SyntaxSet::load_defaults_newlines(),
-            theme_set: ThemeSet::load_defaults(),
+            syntax_set,
+            theme_set,
         }
     }
 
@@ -330,7 +336,7 @@ impl<'a> Renderer<'a> {
                 });
             }
 
-            if let Ok(ranges) = highlighter.highlight_line(line_str, &self.syntax_set) {
+            if let Ok(ranges) = highlighter.highlight_line(line_str, self.syntax_set) {
                 for (syn_style, text) in ranges {
                     let trimmed = text.trim_end_matches('\n').trim_end_matches('\r');
                     if !trimmed.is_empty() {
@@ -1328,13 +1334,45 @@ pub fn render_math(latex: &str) -> String {
     s
 }
 
+/// Pre-loaded syntect resources to avoid re-loading on every render.
+pub struct SyntectRes {
+    pub syntax_set: SyntaxSet,
+    pub theme_set: ThemeSet,
+}
+
+impl SyntectRes {
+    pub fn load() -> Self {
+        Self {
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme_set: ThemeSet::load_defaults(),
+        }
+    }
+}
+
 pub fn render(
     input: &str,
     width: usize,
     theme: &Theme,
     line_numbers: bool,
 ) -> (Vec<Line>, DocumentInfo) {
-    let mut renderer = Renderer::new(width, theme, line_numbers);
+    let res = SyntectRes::load();
+    render_with(input, width, theme, line_numbers, &res)
+}
+
+pub fn render_with(
+    input: &str,
+    width: usize,
+    theme: &Theme,
+    line_numbers: bool,
+    syntect_res: &SyntectRes,
+) -> (Vec<Line>, DocumentInfo) {
+    let mut renderer = Renderer::new(
+        width,
+        theme,
+        line_numbers,
+        &syntect_res.syntax_set,
+        &syntect_res.theme_set,
+    );
 
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);

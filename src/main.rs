@@ -61,6 +61,13 @@ fn main() {
     };
 
     let line_numbers = cli.line_numbers || config.line_numbers;
+    let width = if cli.width > 0 {
+        cli.width
+    } else if config.width > 0 {
+        config.width
+    } else {
+        0
+    };
 
     // Read content: stdin or file(s)
     let (content, filename) = if cli.files.is_empty() {
@@ -90,7 +97,7 @@ fn main() {
     if let Some(ref fmt) = cli.export {
         match fmt.as_str() {
             "html" => {
-                let w = if cli.width > 0 { cli.width } else { 80 };
+                let w = if width > 0 { width } else { 80 };
                 export::to_html(&content, w, &initial_theme);
             }
             _ => {
@@ -102,7 +109,7 @@ fn main() {
     }
 
     // Interactive or piped
-    if io::stdout().is_terminal() {
+    if io::stdout().is_terminal() && !cli.no_color {
         let opts = viewer::ViewerOptions {
             files: cli.files,
             initial_content: content,
@@ -111,15 +118,15 @@ fn main() {
             slide_mode: cli.slides,
             follow_mode: cli.follow,
             line_numbers,
-            width_override: if cli.width > 0 { Some(cli.width) } else { None },
+            width_override: if width > 0 { Some(width) } else { None },
         };
         if let Err(e) = viewer::run(opts) {
             eprintln!("Viewer error: {}", e);
             process::exit(1);
         }
     } else {
-        let w = if cli.width > 0 {
-            cli.width
+        let w = if width > 0 {
+            width
         } else {
             crossterm::terminal::size()
                 .map(|(c, _)| c as usize)
@@ -127,6 +134,10 @@ fn main() {
         };
         let (lines, _) = markdown::render(&content, w, &initial_theme, line_numbers);
         let wrapped = style::wrap_lines(&lines, w);
-        viewer::print_lines(&wrapped);
+        if cli.no_color {
+            viewer::print_lines_plain(&wrapped);
+        } else {
+            viewer::print_lines(&wrapped);
+        }
     }
 }

@@ -41,11 +41,17 @@ pub fn to_html(content: &str, width: usize, theme: &Theme) {
             if span.style.italic {
                 styles.push("font-style:italic".into());
             }
-            if span.style.underline {
-                styles.push("text-decoration:underline".into());
-            }
-            if span.style.strikethrough {
-                styles.push("text-decoration:line-through".into());
+            match (span.style.underline, span.style.strikethrough) {
+                (true, true) => {
+                    styles.push("text-decoration:underline line-through".into());
+                }
+                (true, false) => {
+                    styles.push("text-decoration:underline".into());
+                }
+                (false, true) => {
+                    styles.push("text-decoration:line-through".into());
+                }
+                _ => {}
             }
             if span.style.dim {
                 styles.push("opacity:0.5".into());

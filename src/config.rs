@@ -3,7 +3,6 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 pub struct Config {
     #[serde(default = "default_theme")]
     pub theme: String,
