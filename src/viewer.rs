@@ -156,6 +156,7 @@ struct ViewerState {
     // Fuzzy heading search
     fuzzy_input: String,
     fuzzy_selected: usize,
+    fuzzy_scroll: usize,
 
     // Slide mode
     current_slide: usize,
@@ -225,6 +226,7 @@ impl ViewerState {
             link_input: String::new(),
             fuzzy_input: String::new(),
             fuzzy_selected: 0,
+            fuzzy_scroll: 0,
             current_slide: 0,
             slide_boundaries: Vec::new(),
             last_mtime,
@@ -417,7 +419,7 @@ fn handle_event(state: &mut ViewerState, ev: Event) -> bool {
                 ViewMode::Search => handle_search(state, ke.code),
                 ViewMode::Toc => handle_toc(state, ke.code),
                 ViewMode::LinkPicker => handle_link_picker(state, ke.code),
-                ViewMode::FuzzyHeading => handle_fuzzy(state, ke.code),
+                ViewMode::FuzzyHeading => handle_fuzzy(state, ke.code, ke.modifiers),
             }
         }
         Event::Mouse(me) => match me.kind {
@@ -528,6 +530,7 @@ fn handle_normal(state: &mut ViewerState, code: KeyCode, mods: KeyModifiers) -> 
             if !state.toc_entries.is_empty() {
                 state.fuzzy_input.clear();
                 state.fuzzy_selected = 0;
+                state.fuzzy_scroll = 0;
                 state.mode = ViewMode::FuzzyHeading;
             }
         }
@@ -687,6 +690,11 @@ fn handle_toc(state: &mut ViewerState, code: KeyCode) {
         state.mode = ViewMode::Normal;
         return;
     }
+
+    let viewport = state.viewport();
+    let box_h = (count + 2).min(viewport.saturating_sub(4));
+    let visible_entries = box_h.saturating_sub(2);
+
     match code {
         KeyCode::Esc | KeyCode::Char('o') | KeyCode::Char('q') => {
             state.mode = ViewMode::Normal;
@@ -712,6 +720,15 @@ fn handle_toc(state: &mut ViewerState, code: KeyCode) {
             state.mode = ViewMode::Normal;
         }
         _ => {}
+    }
+
+    // Update scroll to keep selection visible
+    if visible_entries > 0 {
+        if state.toc_selected >= state.toc_scroll + visible_entries {
+            state.toc_scroll = state.toc_selected - visible_entries + 1;
+        } else if state.toc_selected < state.toc_scroll {
+            state.toc_scroll = state.toc_selected;
+        }
     }
 }
 
@@ -741,38 +758,67 @@ fn handle_link_picker(state: &mut ViewerState, code: KeyCode) {
     }
 }
 
-fn handle_fuzzy(state: &mut ViewerState, code: KeyCode) {
-    match code {
-        KeyCode::Esc => {
-            state.mode = ViewMode::Normal;
+fn handle_fuzzy(state: &mut ViewerState, code: KeyCode, mods: KeyModifiers) {
+    let viewport = state.viewport();
+    let max_visible = viewport.saturating_sub(6);
+
+    // Ctrl+n / Ctrl+p for navigation without conflicting with typing
+    let is_nav_down = code == KeyCode::Down
+        || (code == KeyCode::Char('n') && mods.contains(KeyModifiers::CONTROL));
+    let is_nav_up =
+        code == KeyCode::Up || (code == KeyCode::Char('p') && mods.contains(KeyModifiers::CONTROL));
+
+    if is_nav_up {
+        state.fuzzy_selected = state.fuzzy_selected.saturating_sub(1);
+    } else if is_nav_down {
+        let count = fuzzy_filter(&state.toc_entries, &state.fuzzy_input).len();
+        if state.fuzzy_selected + 1 < count {
+            state.fuzzy_selected += 1;
         }
-        KeyCode::Char(c) => {
-            state.fuzzy_input.push(c);
-            state.fuzzy_selected = 0;
+    } else {
+        match code {
+            KeyCode::Esc => {
+                state.mode = ViewMode::Normal;
+            }
+            KeyCode::Char(c) => {
+                state.fuzzy_input.push(c);
+                state.fuzzy_selected = 0;
+                state.fuzzy_scroll = 0;
+            }
+            KeyCode::Backspace => {
+                state.fuzzy_input.pop();
+                state.fuzzy_selected = 0;
+                state.fuzzy_scroll = 0;
+            }
+            KeyCode::Enter => {
+                let filtered = fuzzy_filter(&state.toc_entries, &state.fuzzy_input);
+                if let Some(entry) = filtered.get(state.fuzzy_selected) {
+                    let target = entry.line_idx;
+                    let max = state.max_offset();
+                    state.offset = target.min(max);
+                }
+                state.mode = ViewMode::Normal;
+            }
+            _ => {}
         }
-        KeyCode::Backspace => {
-            state.fuzzy_input.pop();
-            state.fuzzy_selected = 0;
-        }
-        KeyCode::Up => {
-            state.fuzzy_selected = state.fuzzy_selected.saturating_sub(1);
-        }
-        KeyCode::Down => {
-            let filtered = fuzzy_filter(&state.toc_entries, &state.fuzzy_input);
-            if state.fuzzy_selected + 1 < filtered.len() {
-                state.fuzzy_selected += 1;
+    }
+
+    // Clamp selected to filtered results
+    let count = fuzzy_filter(&state.toc_entries, &state.fuzzy_input).len();
+    if count == 0 {
+        state.fuzzy_selected = 0;
+        state.fuzzy_scroll = 0;
+    } else {
+        state.fuzzy_selected = state.fuzzy_selected.min(count - 1);
+        // Update scroll to keep selection visible
+        let visible = count.min(max_visible);
+        if visible > 0 {
+            if state.fuzzy_selected >= state.fuzzy_scroll + visible {
+                state.fuzzy_scroll = state.fuzzy_selected - visible + 1;
+            } else if state.fuzzy_selected < state.fuzzy_scroll {
+                state.fuzzy_scroll = state.fuzzy_selected;
             }
         }
-        KeyCode::Enter => {
-            let filtered = fuzzy_filter(&state.toc_entries, &state.fuzzy_input);
-            if let Some(entry) = filtered.get(state.fuzzy_selected) {
-                let target = entry.line_idx;
-                let max = state.max_offset();
-                state.offset = target.min(max);
-            }
-            state.mode = ViewMode::Normal;
-        }
-        _ => {}
     }
 }
 
@@ -1351,16 +1397,14 @@ fn render_toc_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Resul
     let x_off = (width.saturating_sub(box_w)) / 2;
     let y_off = (viewport.saturating_sub(box_h)) / 2 + 1;
 
-    // Ensure selected is visible
-    let scroll = if state.toc_selected >= state.toc_scroll + visible_entries {
-        state.toc_selected.saturating_sub(visible_entries - 1)
-    } else if state.toc_selected < state.toc_scroll {
-        state.toc_selected
-    } else {
-        state.toc_scroll
-    };
+    let scroll = state.toc_scroll;
 
-    let title = " Table of Contents ";
+    // Title with count
+    let title = format!(
+        " Table of Contents ({}/{}) ",
+        state.toc_selected + 1,
+        entries.len()
+    );
     let title_len = title.chars().count();
     let top_dashes = box_w.saturating_sub(3 + title_len);
 
@@ -1371,7 +1415,7 @@ fn render_toc_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Resul
         SetForegroundColor(theme.overlay_border),
         Print("╭─"),
         SetForegroundColor(theme.overlay_text),
-        Print(title),
+        Print(&title),
         SetForegroundColor(theme.overlay_border),
         Print(format!("{}╮", "─".repeat(top_dashes))),
     )?;
@@ -1388,11 +1432,14 @@ fn render_toc_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Resul
 
         if let Some(entry) = entries.get(entry_idx) {
             let is_selected = entry_idx == state.toc_selected;
+            let level_tag = format!("H{}", entry.level);
             let indent = ((entry.level as usize).saturating_sub(1)) * 2;
             let prefix = " ".repeat(indent + 1);
             let marker = if is_selected { "▸ " } else { "  " };
             let text = &entry.text;
-            let available = box_w.saturating_sub(3 + indent + 2);
+            // Account for level tag: " H1 " = 4 chars
+            let tag_len = level_tag.len() + 2; // space + tag + space
+            let available = box_w.saturating_sub(3 + indent + 2 + tag_len);
             let display: String = if text.chars().count() > available {
                 text.chars()
                     .take(available.saturating_sub(1))
@@ -1401,9 +1448,9 @@ fn render_toc_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Resul
             } else {
                 text.clone()
             };
-            let padding = box_w.saturating_sub(2).saturating_sub(
-                prefix.chars().count() + marker.chars().count() + display.chars().count(),
-            );
+            let content_len =
+                prefix.chars().count() + marker.chars().count() + display.chars().count() + tag_len;
+            let padding = box_w.saturating_sub(2).saturating_sub(content_len);
 
             if is_selected {
                 queue!(
@@ -1424,11 +1471,26 @@ fn render_toc_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Resul
                 Print(marker),
                 Print(&display),
                 Print(" ".repeat(padding)),
-                SetAttribute(Attribute::Reset),
-                SetBackgroundColor(theme.overlay_bg),
-                SetForegroundColor(theme.overlay_border),
-                Print("│"),
             )?;
+            // Level tag (muted)
+            if is_selected {
+                queue!(
+                    stdout,
+                    SetForegroundColor(theme.overlay_muted),
+                    Print(format!(" {} ", level_tag)),
+                    SetBackgroundColor(theme.overlay_bg),
+                    SetForegroundColor(theme.overlay_border),
+                    Print("│"),
+                )?;
+            } else {
+                queue!(
+                    stdout,
+                    SetForegroundColor(theme.overlay_muted),
+                    Print(format!(" {} ", level_tag)),
+                    SetForegroundColor(theme.overlay_border),
+                    Print("│"),
+                )?;
+            }
         } else {
             queue!(
                 stdout,
@@ -1440,7 +1502,7 @@ fn render_toc_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Resul
         }
     }
 
-    let footer = " ↑↓ navigate · Enter jump · Esc close ";
+    let footer = " j/k navigate · Enter jump · Esc close ";
     let footer_len = footer.chars().count();
     let bot_dashes = box_w.saturating_sub(3 + footer_len);
 
@@ -1563,18 +1625,34 @@ fn render_fuzzy_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Res
     let viewport = state.viewport();
 
     let filtered = fuzzy_filter(&state.toc_entries, &state.fuzzy_input);
+    let total = filtered.len();
 
     let box_w = (width * 2 / 3).max(30).min(width.saturating_sub(6));
     let max_entries = viewport.saturating_sub(6);
-    let shown = filtered.len().min(max_entries);
-    let box_h = shown + 3; // title/input + entries + bottom
+    // Show at least 1 row for "no results" message
+    let visible = if total == 0 {
+        1
+    } else {
+        total.min(max_entries)
+    };
+    let box_h = visible + 3; // input row + entries + bottom
     let x_off = (width.saturating_sub(box_w)) / 2;
     let y_off = (viewport.saturating_sub(box_h)) / 2 + 1;
 
-    // Input row (top)
+    let scroll = state.fuzzy_scroll;
+
+    // Input row with match count
+    let count_label = if state.fuzzy_input.is_empty() {
+        format!("{} headings", total)
+    } else if total == 0 {
+        "no match".to_string()
+    } else {
+        format!("{}/{} ", state.fuzzy_selected + 1, total)
+    };
     let input_display = format!(" > {}█ ", state.fuzzy_input);
     let input_len = input_display.chars().count();
-    let top_dashes = box_w.saturating_sub(3 + input_len);
+    let count_len = count_label.chars().count();
+    let top_dashes = box_w.saturating_sub(3 + input_len + count_len + 1);
 
     queue!(
         stdout,
@@ -1585,71 +1663,124 @@ fn render_fuzzy_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Res
         SetForegroundColor(theme.search_prompt),
         Print(&input_display),
         SetForegroundColor(theme.overlay_border),
-        Print(format!("{}╮", "─".repeat(top_dashes))),
+        Print("─".repeat(top_dashes)),
+        SetForegroundColor(theme.overlay_muted),
+        Print(format!(" {}", count_label)),
+        SetForegroundColor(theme.overlay_border),
+        Print("╮"),
     )?;
 
-    for (i, entry) in filtered.iter().enumerate().take(shown) {
-        let is_selected = i == state.fuzzy_selected;
-        let indent = ((entry.level as usize).saturating_sub(1)) * 2;
-        let prefix = " ".repeat(indent + 1);
-        let marker = if is_selected { "▸ " } else { "  " };
-        let available = box_w.saturating_sub(3 + indent + 2);
-        let display: String = if entry.text.chars().count() > available {
-            entry
-                .text
-                .chars()
-                .take(available.saturating_sub(1))
-                .collect::<String>()
-                + "…"
-        } else {
-            entry.text.clone()
-        };
-        let padding = box_w.saturating_sub(2).saturating_sub(
-            prefix.chars().count() + marker.chars().count() + display.chars().count(),
-        );
-
+    if total == 0 {
+        // "No results" row
+        let msg = "  No matching headings";
+        let msg_len = msg.chars().count();
+        let padding = box_w.saturating_sub(2 + msg_len);
         queue!(
             stdout,
-            MoveTo(x_off as u16, (y_off + 1 + i) as u16),
+            MoveTo(x_off as u16, (y_off + 1) as u16),
             SetBackgroundColor(theme.overlay_bg),
             SetForegroundColor(theme.overlay_border),
             Print("│"),
-        )?;
-
-        if is_selected {
-            queue!(
-                stdout,
-                SetBackgroundColor(theme.overlay_selected_bg),
-                SetForegroundColor(theme.overlay_selected_fg),
-            )?;
-        } else {
-            queue!(
-                stdout,
-                SetBackgroundColor(theme.overlay_bg),
-                SetForegroundColor(theme.overlay_text),
-            )?;
-        }
-
-        queue!(
-            stdout,
-            Print(&prefix),
-            Print(marker),
-            Print(&display),
+            SetForegroundColor(theme.overlay_muted),
+            Print(msg),
             Print(" ".repeat(padding)),
-            SetAttribute(Attribute::Reset),
-            SetBackgroundColor(theme.overlay_bg),
             SetForegroundColor(theme.overlay_border),
             Print("│"),
         )?;
+    } else {
+        for i in 0..visible {
+            let entry_idx = scroll + i;
+            queue!(
+                stdout,
+                MoveTo(x_off as u16, (y_off + 1 + i) as u16),
+                SetBackgroundColor(theme.overlay_bg),
+                SetForegroundColor(theme.overlay_border),
+                Print("│"),
+            )?;
+
+            if let Some(entry) = filtered.get(entry_idx) {
+                let is_selected = entry_idx == state.fuzzy_selected;
+                let level_tag = format!("H{}", entry.level);
+                let indent = ((entry.level as usize).saturating_sub(1)) * 2;
+                let prefix = " ".repeat(indent + 1);
+                let marker = if is_selected { "▸ " } else { "  " };
+                let tag_len = level_tag.len() + 2;
+                let available = box_w.saturating_sub(3 + indent + 2 + tag_len);
+                let display: String = if entry.text.chars().count() > available {
+                    entry
+                        .text
+                        .chars()
+                        .take(available.saturating_sub(1))
+                        .collect::<String>()
+                        + "…"
+                } else {
+                    entry.text.clone()
+                };
+                let content_len = prefix.chars().count()
+                    + marker.chars().count()
+                    + display.chars().count()
+                    + tag_len;
+                let padding = box_w.saturating_sub(2).saturating_sub(content_len);
+
+                if is_selected {
+                    queue!(
+                        stdout,
+                        SetBackgroundColor(theme.overlay_selected_bg),
+                        SetForegroundColor(theme.overlay_selected_fg),
+                    )?;
+                } else {
+                    queue!(
+                        stdout,
+                        SetBackgroundColor(theme.overlay_bg),
+                        SetForegroundColor(theme.overlay_text),
+                    )?;
+                }
+
+                queue!(
+                    stdout,
+                    Print(&prefix),
+                    Print(marker),
+                    Print(&display),
+                    Print(" ".repeat(padding)),
+                )?;
+                // Level tag
+                if is_selected {
+                    queue!(
+                        stdout,
+                        SetForegroundColor(theme.overlay_muted),
+                        Print(format!(" {} ", level_tag)),
+                        SetBackgroundColor(theme.overlay_bg),
+                        SetForegroundColor(theme.overlay_border),
+                        Print("│"),
+                    )?;
+                } else {
+                    queue!(
+                        stdout,
+                        SetForegroundColor(theme.overlay_muted),
+                        Print(format!(" {} ", level_tag)),
+                        SetForegroundColor(theme.overlay_border),
+                        Print("│"),
+                    )?;
+                }
+            } else {
+                queue!(
+                    stdout,
+                    SetBackgroundColor(theme.overlay_bg),
+                    Print(" ".repeat(box_w.saturating_sub(2))),
+                    SetForegroundColor(theme.overlay_border),
+                    Print("│"),
+                )?;
+            }
+        }
     }
 
-    let footer = " type to filter · ↑↓ · Enter jump · Esc ";
+    let footer = " type to filter · ↑↓ select · Enter jump · Esc ";
     let footer_len = footer.chars().count();
     let bot_dashes = box_w.saturating_sub(3 + footer_len);
 
     queue!(
         stdout,
-        MoveTo(x_off as u16, (y_off + 1 + shown) as u16),
+        MoveTo(x_off as u16, (y_off + 1 + visible) as u16),
         SetBackgroundColor(theme.overlay_bg),
         SetForegroundColor(theme.overlay_border),
         Print("╰─"),
