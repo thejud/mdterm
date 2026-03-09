@@ -87,14 +87,30 @@ impl Renderer {
 
         if let Some(level) = self.heading_level {
             style.bold = true;
-            style.fg = Some(match level {
-                HeadingLevel::H1 => Color::White,
-                HeadingLevel::H2 => Color::Rgb { r: 138, g: 180, b: 248 },
-                HeadingLevel::H3 => Color::Rgb { r: 190, g: 145, b: 230 },
-                HeadingLevel::H4 => Color::Rgb { r: 129, g: 199, b: 132 },
-                HeadingLevel::H5 => Color::Rgb { r: 255, g: 183, b: 77 },
-                HeadingLevel::H6 => Color::Rgb { r: 150, g: 150, b: 150 },
-            });
+            match level {
+                HeadingLevel::H1 => {
+                    style.fg = Some(Color::White);
+                }
+                HeadingLevel::H2 => {
+                    style.fg = Some(Color::Rgb { r: 138, g: 180, b: 248 });
+                }
+                HeadingLevel::H3 => {
+                    style.fg = Some(Color::Rgb { r: 190, g: 145, b: 230 });
+                }
+                HeadingLevel::H4 => {
+                    style.fg = Some(Color::Rgb { r: 129, g: 199, b: 132 });
+                    style.bold = false;
+                }
+                HeadingLevel::H5 => {
+                    style.fg = Some(Color::Rgb { r: 255, g: 183, b: 77 });
+                    style.bold = false;
+                }
+                HeadingLevel::H6 => {
+                    style.fg = Some(Color::Rgb { r: 130, g: 130, b: 140 });
+                    style.bold = false;
+                    style.dim = true;
+                }
+            }
         }
 
         if self.bold {
@@ -135,12 +151,6 @@ impl Renderer {
             spans.append(&mut self.current_spans);
             self.lines.push(Line { spans });
         }
-    }
-
-    fn push_spacing(&mut self) {
-        // Push two empty lines for extra spacing between major blocks
-        self.push_empty_line();
-        self.lines.push(Line::empty());
     }
 
     fn push_empty_line(&mut self) {
@@ -498,11 +508,56 @@ impl Renderer {
             }
 
             Event::Start(Tag::Heading { level, .. }) => {
-                // Extra spacing before headings for visual separation
                 if !self.lines.is_empty() {
-                    self.push_spacing();
+                    // Major sections (H1/H2) get a visible separator line
+                    if matches!(level, HeadingLevel::H1 | HeadingLevel::H2) {
+                        self.push_empty_line();
+                        let sep_fg = Color::Rgb { r: 45, g: 48, b: 58 };
+                        self.lines.push(Line {
+                            spans: vec![StyledSpan {
+                                text: "─".repeat(self.width.min(60)),
+                                style: Style {
+                                    fg: Some(sep_fg),
+                                    dim: true,
+                                    ..Default::default()
+                                },
+                            }],
+                        });
+                        self.push_empty_line();
+                    } else {
+                        self.push_empty_line();
+                    }
                 }
                 self.heading_level = Some(level);
+                // Add a subtle level prefix for H3+
+                match level {
+                    HeadingLevel::H3 => {
+                        self.push_span("▸ ", Style {
+                            fg: Some(Color::Rgb { r: 130, g: 100, b: 170 }),
+                            ..Default::default()
+                        });
+                    }
+                    HeadingLevel::H4 => {
+                        self.push_span("  ▸ ", Style {
+                            fg: Some(Color::Rgb { r: 100, g: 160, b: 100 }),
+                            ..Default::default()
+                        });
+                    }
+                    HeadingLevel::H5 => {
+                        self.push_span("    ▸ ", Style {
+                            fg: Some(Color::Rgb { r: 180, g: 140, b: 60 }),
+                            ..Default::default()
+                        });
+                    }
+                    HeadingLevel::H6 => {
+                        self.push_span("      ▸ ", Style {
+                            fg: Some(Color::Rgb { r: 100, g: 100, b: 110 }),
+                            dim: true,
+                            ..Default::default()
+                        });
+                    }
+                    _ => {}
+                }
             }
             Event::End(TagEnd::Heading(_)) => {
                 self.flush_line();
@@ -522,7 +577,7 @@ impl Renderer {
             }
             Event::End(TagEnd::BlockQuote) => {
                 self.in_blockquote = false;
-                self.push_spacing();
+                self.push_empty_line();
             }
 
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -536,7 +591,7 @@ impl Renderer {
             Event::End(TagEnd::CodeBlock) => {
                 self.emit_code_block();
                 self.in_code_block = false;
-                self.push_spacing();
+                self.push_empty_line();
             }
 
             Event::Start(Tag::List(ordered)) => {
@@ -554,7 +609,7 @@ impl Renderer {
             Event::End(TagEnd::List(_)) => {
                 self.list_stack.pop();
                 if self.list_stack.is_empty() {
-                    self.push_spacing();
+                    self.push_empty_line();
                 }
             }
 
@@ -615,7 +670,7 @@ impl Renderer {
                 self.table_alignments.clear();
                 self.table_head.clear();
                 self.table_rows.clear();
-                self.push_spacing();
+                self.push_empty_line();
             }
             Event::Start(Tag::TableHead) => {
                 self.in_table_head = true;
