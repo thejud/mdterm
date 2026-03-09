@@ -136,8 +136,9 @@ impl Renderer {
     fn emit_code_block(&mut self) {
         let lang = self.code_block_lang.trim().to_string();
         let code = std::mem::take(&mut self.code_block_content);
-        let code_bg = Color::Rgb { r: 35, g: 38, b: 46 };
-        let border_fg = Color::Rgb { r: 65, g: 65, b: 70 };
+        let code_bg = Color::Rgb { r: 30, g: 33, b: 40 };
+        let border_fg = Color::Rgb { r: 55, g: 58, b: 65 };
+        let label_fg = Color::Rgb { r: 110, g: 115, b: 130 };
 
         let syntax = if lang.is_empty() {
             self.syntax_set.find_syntax_plain_text()
@@ -150,37 +151,77 @@ impl Renderer {
         let theme = &self.theme_set.themes["base16-ocean.dark"];
         let mut highlighter = HighlightLines::new(syntax, theme);
 
-        // Top border with language label
+        // Measure content to size the box
+        let code_lines: Vec<&str> = code.lines().collect();
+        let max_line_len = code_lines
+            .iter()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0);
+        let content_width = max_line_len.max(40);
+        // Inner width between ╭/│ and ╮/│: " " + content + " "
+        let inner_width = content_width + 2;
+
+        // Language label
         let label = if lang.is_empty() {
             String::new()
         } else {
             format!(" {} ", lang)
         };
-        let border_width = 60usize.saturating_sub(label.len() + 4);
-        self.lines.push(Line {
-            spans: vec![StyledSpan {
-                text: format!("  ╭─{}{}╮", label, "─".repeat(border_width)),
+        let label_len = label.chars().count();
+
+        // Top border: "  ╭─ lang ──...──╮"
+        let dashes_after = inner_width.saturating_sub(1 + label_len);
+        let mut top_spans = vec![StyledSpan {
+            text: "  ╭─".to_string(),
+            style: Style {
+                fg: Some(border_fg),
+                ..Default::default()
+            },
+        }];
+        if !lang.is_empty() {
+            top_spans.push(StyledSpan {
+                text: label,
                 style: Style {
-                    fg: Some(border_fg),
+                    fg: Some(label_fg),
                     ..Default::default()
                 },
-            }],
+            });
+        }
+        top_spans.push(StyledSpan {
+            text: format!("{}╮", "─".repeat(dashes_after)),
+            style: Style {
+                fg: Some(border_fg),
+                ..Default::default()
+            },
         });
+        self.lines.push(Line { spans: top_spans });
 
+        // Code lines with left border, syntax highlighting, padding, and right border
         for line_str in LinesWithEndings::from(&code) {
-            let mut spans = vec![StyledSpan {
-                text: "  │ ".to_string(),
-                style: Style {
-                    fg: Some(border_fg),
-                    bg: Some(code_bg),
-                    ..Default::default()
+            let mut spans = vec![
+                StyledSpan {
+                    text: "  │".to_string(),
+                    style: Style {
+                        fg: Some(border_fg),
+                        ..Default::default()
+                    },
                 },
-            }];
+                StyledSpan {
+                    text: " ".to_string(),
+                    style: Style {
+                        bg: Some(code_bg),
+                        ..Default::default()
+                    },
+                },
+            ];
 
+            let mut char_count = 0;
             if let Ok(ranges) = highlighter.highlight_line(line_str, &self.syntax_set) {
                 for (syn_style, text) in ranges {
                     let trimmed = text.trim_end_matches('\n').trim_end_matches('\r');
                     if !trimmed.is_empty() {
+                        char_count += trimmed.chars().count();
                         let mut style = syntect_to_style(syn_style);
                         style.bg = Some(code_bg);
                         spans.push(StyledSpan {
@@ -190,11 +231,12 @@ impl Renderer {
                     }
                 }
             } else {
+                let trimmed = line_str
+                    .trim_end_matches('\n')
+                    .trim_end_matches('\r');
+                char_count = trimmed.chars().count();
                 spans.push(StyledSpan {
-                    text: line_str
-                        .trim_end_matches('\n')
-                        .trim_end_matches('\r')
-                        .to_string(),
+                    text: trimmed.to_string(),
                     style: Style {
                         bg: Some(code_bg),
                         ..Default::default()
@@ -202,13 +244,30 @@ impl Renderer {
                 });
             }
 
+            // Right padding (fill to content_width) + right margin
+            let padding = content_width.saturating_sub(char_count) + 1;
+            spans.push(StyledSpan {
+                text: " ".repeat(padding),
+                style: Style {
+                    bg: Some(code_bg),
+                    ..Default::default()
+                },
+            });
+            spans.push(StyledSpan {
+                text: "│".to_string(),
+                style: Style {
+                    fg: Some(border_fg),
+                    ..Default::default()
+                },
+            });
+
             self.lines.push(Line { spans });
         }
 
         // Bottom border
         self.lines.push(Line {
             spans: vec![StyledSpan {
-                text: format!("  ╰{}╯", "─".repeat(border_width + label.len() + 1)),
+                text: format!("  ╰{}╯", "─".repeat(inner_width)),
                 style: Style {
                     fg: Some(border_fg),
                     ..Default::default()
@@ -357,10 +416,26 @@ impl Renderer {
 
             Event::Code(code) => {
                 self.push_span(
-                    &format!(" {} ", code),
+                    "`",
                     Style {
-                        fg: Some(Color::Rgb { r: 240, g: 185, b: 120 }),
-                        bg: Some(Color::Rgb { r: 45, g: 45, b: 50 }),
+                        fg: Some(Color::Rgb { r: 70, g: 70, b: 80 }),
+                        bg: Some(Color::Rgb { r: 40, g: 42, b: 48 }),
+                        ..Default::default()
+                    },
+                );
+                self.push_span(
+                    &code,
+                    Style {
+                        fg: Some(Color::Rgb { r: 230, g: 175, b: 110 }),
+                        bg: Some(Color::Rgb { r: 40, g: 42, b: 48 }),
+                        ..Default::default()
+                    },
+                );
+                self.push_span(
+                    "`",
+                    Style {
+                        fg: Some(Color::Rgb { r: 70, g: 70, b: 80 }),
+                        bg: Some(Color::Rgb { r: 40, g: 42, b: 48 }),
                         ..Default::default()
                     },
                 );

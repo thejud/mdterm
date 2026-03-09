@@ -129,7 +129,9 @@ fn render_frame(
                 col += span.text.chars().count();
             }
             if col < width {
-                let line_bg = line.spans.iter().find_map(|s| s.style.bg);
+                // Use the last span's bg for fill — if the line ends with a
+                // border character (no bg), we won't bleed color past it.
+                let line_bg = line.spans.last().and_then(|s| s.style.bg);
                 if let Some(bg) = line_bg {
                     queue!(
                         stdout,
