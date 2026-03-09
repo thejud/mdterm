@@ -118,6 +118,12 @@ impl Renderer {
     }
 
     fn push_empty_line(&mut self) {
+        // Avoid consecutive empty lines
+        if let Some(last) = self.lines.last() {
+            if last.spans.is_empty() {
+                return;
+            }
+        }
         if self.in_blockquote {
             self.lines.push(Line {
                 spans: vec![StyledSpan {
@@ -287,36 +293,9 @@ impl Renderer {
             Event::Start(Tag::Heading { level, .. }) => {
                 self.heading_level = Some(level);
             }
-            Event::End(TagEnd::Heading(level)) => {
+            Event::End(TagEnd::Heading(_)) => {
                 self.flush_line();
                 self.heading_level = None;
-                match level {
-                    HeadingLevel::H1 => {
-                        let w = self.lines.last().map(|l| l.display_width()).unwrap_or(20);
-                        self.lines.push(Line {
-                            spans: vec![StyledSpan {
-                                text: "━".repeat(w.max(20)),
-                                style: Style {
-                                    fg: Some(Color::Rgb { r: 100, g: 100, b: 100 }),
-                                    ..Default::default()
-                                },
-                            }],
-                        });
-                    }
-                    HeadingLevel::H2 => {
-                        let w = self.lines.last().map(|l| l.display_width()).unwrap_or(20);
-                        self.lines.push(Line {
-                            spans: vec![StyledSpan {
-                                text: "─".repeat(w.max(20)),
-                                style: Style {
-                                    fg: Some(Color::Rgb { r: 70, g: 70, b: 70 }),
-                                    ..Default::default()
-                                },
-                            }],
-                        });
-                    }
-                    _ => {}
-                }
                 self.push_empty_line();
             }
 

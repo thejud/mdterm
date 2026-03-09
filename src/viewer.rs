@@ -44,13 +44,13 @@ pub fn run(lines: Vec<Line>, filename: &str) -> io::Result<()> {
     let _guard = TerminalGuard;
 
     let (mut cols, mut rows) = size()?;
-    let mut wrapped = wrap_lines(&lines, cols as usize);
+    let mut wrapped = wrap_lines(&lines, (cols as usize).saturating_sub(4));
     let mut offset: usize = 0;
 
     loop {
         let height = rows as usize;
         let width = cols as usize;
-        let viewport = height.saturating_sub(1);
+        let viewport = height.saturating_sub(2);
         let max_offset = wrapped.len().saturating_sub(viewport);
         offset = offset.min(max_offset);
 
@@ -100,7 +100,7 @@ pub fn run(lines: Vec<Line>, filename: &str) -> io::Result<()> {
             Event::Resize(c, r) => {
                 cols = c;
                 rows = r;
-                wrapped = wrap_lines(&lines, cols as usize);
+                wrapped = wrap_lines(&lines, (cols as usize).saturating_sub(4));
             }
             _ => {}
         }
@@ -118,37 +118,73 @@ fn render_frame(
     viewport: usize,
     filename: &str,
 ) -> io::Result<()> {
-    queue!(stdout, MoveTo(0, 0))?;
+    let border_fg = Color::Rgb { r: 55, g: 58, b: 65 };
+    let label_fg = Color::Rgb { r: 120, g: 125, b: 140 };
+    let pos_fg = Color::Rgb { r: 90, g: 95, b: 110 };
+    let content_width = width.saturating_sub(4); // │ + space + content + space + │
 
+    // ── Top border: ╭─ filename ──...──╮ ──
+    let file_label = format!(" {} ", filename);
+    let file_label_len = file_label.chars().count();
+    let top_fill = width.saturating_sub(3 + file_label_len);
+
+    queue!(
+        stdout,
+        MoveTo(0, 0),
+        SetForegroundColor(border_fg),
+        Print("╭─"),
+        SetForegroundColor(label_fg),
+        Print(&file_label),
+        SetForegroundColor(border_fg),
+        Print(format!("{}╮", "─".repeat(top_fill))),
+        SetAttribute(Attribute::Reset),
+    )?;
+
+    // ── Content lines with left/right borders ──
     for row in 0..viewport {
-        queue!(stdout, MoveTo(0, row as u16))?;
+        queue!(stdout, MoveTo(0, (row + 1) as u16))?;
+
+        // Left border
+        queue!(
+            stdout,
+            SetForegroundColor(border_fg),
+            Print("│ "),
+            SetAttribute(Attribute::Reset),
+        )?;
+
         if let Some(line) = lines.get(offset + row) {
             let mut col = 0;
             for span in &line.spans {
                 write_span(stdout, span)?;
                 col += span.text.chars().count();
             }
-            if col < width {
-                // Use the last span's bg for fill — if the line ends with a
-                // border character (no bg), we won't bleed color past it.
+            if col < content_width {
                 let line_bg = line.spans.last().and_then(|s| s.style.bg);
                 if let Some(bg) = line_bg {
                     queue!(
                         stdout,
                         SetBackgroundColor(bg),
-                        Print(" ".repeat(width - col)),
+                        Print(" ".repeat(content_width - col)),
                         SetAttribute(Attribute::Reset)
                     )?;
                 } else {
-                    queue!(stdout, Print(" ".repeat(width - col)))?;
+                    queue!(stdout, Print(" ".repeat(content_width - col)))?;
                 }
             }
         } else {
-            queue!(stdout, Print(" ".repeat(width)))?;
+            queue!(stdout, Print(" ".repeat(content_width)))?;
         }
+
+        // Right border
+        queue!(
+            stdout,
+            SetForegroundColor(border_fg),
+            Print(" │"),
+            SetAttribute(Attribute::Reset),
+        )?;
     }
 
-    // Status bar
+    // ── Bottom border with position: ╰──...── position ─╯ ──
     let position = if lines.len() <= viewport {
         "All".to_string()
     } else if offset == 0 {
@@ -159,39 +195,22 @@ fn render_frame(
         let pct = (offset + viewport) * 100 / lines.len();
         format!("{}%", pct)
     };
-    let bar_bg = Color::Rgb { r: 35, g: 38, b: 46 };
-    let left = format!(" {}", filename);
-    let right = format!("{} ", position);
-    let left_w = left.chars().count();
-    let right_w = right.chars().count();
+
+    let pos_label = format!(" {} ", position);
+    let pos_label_len = pos_label.chars().count();
+    let bot_fill = width.saturating_sub(3 + pos_label_len);
 
     queue!(
         stdout,
-        MoveTo(0, viewport as u16),
-        SetBackgroundColor(bar_bg),
+        MoveTo(0, (viewport + 1) as u16),
+        SetForegroundColor(border_fg),
+        Print(format!("╰{}", "─".repeat(bot_fill))),
+        SetForegroundColor(pos_fg),
+        Print(&pos_label),
+        SetForegroundColor(border_fg),
+        Print("─╯"),
+        SetAttribute(Attribute::Reset),
     )?;
-
-    if left_w + right_w <= width {
-        let gap = width - left_w - right_w;
-        queue!(
-            stdout,
-            SetForegroundColor(Color::Rgb { r: 180, g: 180, b: 190 }),
-            Print(&left),
-            SetForegroundColor(Color::Rgb { r: 90, g: 90, b: 100 }),
-            Print(" ".repeat(gap)),
-            Print(&right),
-        )?;
-    } else {
-        let truncated: String = left.chars().take(width).collect();
-        queue!(
-            stdout,
-            SetForegroundColor(Color::Rgb { r: 180, g: 180, b: 190 }),
-            Print(&truncated),
-            Print(" ".repeat(width.saturating_sub(truncated.chars().count()))),
-        )?;
-    }
-
-    queue!(stdout, SetAttribute(Attribute::Reset))?;
 
     stdout.flush()
 }
