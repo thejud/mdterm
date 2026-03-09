@@ -6,7 +6,7 @@ A terminal-based Markdown viewer written in Rust. Renders Markdown files with sy
 
 - **Interactive TUI** — Scroll, navigate with keyboard and mouse
 - **Syntax highlighting** — Code blocks highlighted via syntect (base16-ocean.dark / InspiredGitHub themes)
-- **Rich formatting** — Headings, bold, italic, strikethrough, lists, blockquotes, tables, images
+- **Rich formatting** — Headings, bold, italic, strikethrough, lists, blockquotes, tables, task lists, images
 - **Clickable links** — OSC 8 hyperlinks in supporting terminals
 - **In-document search** — `/` to search with regex support, `n`/`N` to jump between matches
 - **Table of contents** — Press `o` to browse and jump to any heading
@@ -14,6 +14,7 @@ A terminal-based Markdown viewer written in Rust. Renders Markdown files with sy
 - **Heading jumps** — `[` / `]` to jump between sections
 - **Link picker** — Press `f` to list all links, type a number to open in browser
 - **Clipboard** — `y` copies current section, `Y` copies full document, `c` copies a code block
+- **Mermaid diagrams** — Visual rendering of flowcharts/graphs in the terminal with box-drawing characters
 - **Math rendering** — LaTeX to Unicode: `$\alpha + \beta$` renders as `α + β`
 - **Slide mode** — `--slides` treats `---` as slide separators for terminal presentations
 - **Follow mode** — `--follow` watches the file and auto-reloads on changes
@@ -97,9 +98,10 @@ mdterm README.md | less -R
 
 | Key | Action |
 |-----|--------|
-| `Right` / `Space` / `l` | Next slide |
-| `Left` / `b` / `h` | Previous slide |
-| `g` / `G` | First / last slide |
+| `Right` / `Space` / `l` / `j` / `Down` / `Page Down` | Next slide |
+| `Left` / `b` / `h` / `k` / `Up` / `Page Up` | Previous slide |
+| `g` / `Home` | First slide |
+| `G` / `End` | Last slide |
 
 ## Configuration
 
@@ -108,6 +110,7 @@ Create `~/.config/mdterm/config.toml`:
 ```toml
 theme = "dark"          # "dark" or "light"
 line_numbers = false     # show line numbers in code blocks
+width = 0               # display width (0 = auto)
 ```
 
 CLI flags override config file settings.
