@@ -10,8 +10,8 @@ use crossterm::{
     execute, queue,
     style::{Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor},
     terminal::{
-        BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen,
-        LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
+        BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+        disable_raw_mode, enable_raw_mode, size,
     },
 };
 
@@ -51,7 +51,10 @@ pub fn run(opts: ViewerOptions) -> io::Result<()> {
         // Clear transient status after rendering so it shows for one frame
         state.status_msg = None;
 
-        let timeout = if state.follow_mode {
+        let timeout = if state.fast_scrolling {
+            // Short timeout so images re-appear quickly after scroll stops
+            Duration::from_millis(50)
+        } else if state.follow_mode {
             Duration::from_millis(500)
         } else {
             Duration::from_secs(3600)
@@ -59,11 +62,30 @@ pub fn run(opts: ViewerOptions) -> io::Result<()> {
 
         if event::poll(timeout)? {
             let ev = event::read()?;
-            if handle_event(&mut state, ev) {
+            let mut quit = handle_event(&mut state, ev);
+
+            // Coalesce pending events: drain all queued events before rendering
+            // so rapid scrolling produces one frame instead of dozens
+            let mut coalesced = false;
+            while !quit && event::poll(Duration::ZERO)? {
+                let ev = event::read()?;
+                quit = handle_event(&mut state, ev);
+                coalesced = true;
+            }
+
+            // Mark fast scrolling so render_frame can skip expensive image
+            // re-encoding for non-Kitty protocols (iTerm2, HalfBlock)
+            state.fast_scrolling = coalesced;
+
+            if quit {
                 break;
             }
-        } else if state.follow_mode {
-            state.check_file_changed();
+        } else {
+            // No events pending — clear fast_scrolling so images render
+            state.fast_scrolling = false;
+            if state.follow_mode {
+                state.check_file_changed();
+            }
         }
     }
 
@@ -203,6 +225,9 @@ struct ViewerState {
 
     // Image cache
     image_cache: crate::image::ImageCache,
+
+    // Scroll performance: skip expensive image rendering during rapid scroll
+    fast_scrolling: bool,
 }
 
 #[derive(Clone)]
@@ -268,6 +293,7 @@ impl ViewerState {
             last_mtime,
             status_msg: None,
             image_cache: crate::image::ImageCache::new(),
+            fast_scrolling: false,
         }
     }
 
@@ -358,10 +384,7 @@ impl ViewerState {
                 {
                     let url = url.clone();
                     let alt = alt.clone();
-                    let actual_rows = self
-                        .image_cache
-                        .ideal_rows(&url, cw)
-                        .unwrap_or(total_rows);
+                    let actual_rows = self.image_cache.ideal_rows(&url, cw).unwrap_or(total_rows);
 
                     for r in 0..actual_rows {
                         new_wrapped.push(Line {
@@ -1285,14 +1308,18 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
 
         let mut drew_inline_image = false;
         if let Some(line) = state.wrapped.get(line_idx) {
-            // Render image pixels inline (like code blocks) for all protocols
+            // Render image pixels inline. During rapid scrolling, skip
+            // expensive HalfBlock rendering (re-sends color data each frame).
+            // Kitty is cheap (tiny placement commands) so always renders.
             if let LineMeta::Image {
                 ref url,
                 row: image_row,
                 ..
             } = line.meta
             {
-                if state.image_cache.has_image(url) {
+                let skip = state.fast_scrolling
+                    && state.image_cache.protocol() == crate::image::ImageProtocol::HalfBlock;
+                if !skip && state.image_cache.has_image(url) {
                     drew_inline_image = state.image_cache.render_image_row(
                         stdout,
                         url,
@@ -1323,14 +1350,13 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
                     col += span.text.chars().count();
                 }
                 if col < content_width {
-                    let common_bg =
-                        line.spans.first().and_then(|s| s.style.bg).and_then(|bg| {
-                            if line.spans.iter().all(|s| s.style.bg == Some(bg)) {
-                                Some(bg)
-                            } else {
-                                None
-                            }
-                        });
+                    let common_bg = line.spans.first().and_then(|s| s.style.bg).and_then(|bg| {
+                        if line.spans.iter().all(|s| s.style.bg == Some(bg)) {
+                            Some(bg)
+                        } else {
+                            None
+                        }
+                    });
                     if let Some(bg) = common_bg {
                         queue!(
                             stdout,
@@ -1395,7 +1421,6 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
     queue!(stdout, EndSynchronizedUpdate)?;
     stdout.flush()
 }
-
 
 fn render_status_bar(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result<()> {
     let width = state.cols as usize;
