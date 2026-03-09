@@ -9,6 +9,7 @@ pub struct Style {
     pub underline: bool,
     pub strikethrough: bool,
     pub dim: bool,
+    pub link_url: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -18,18 +19,48 @@ pub struct StyledSpan {
 }
 
 #[derive(Clone, Debug, Default)]
+pub enum LineMeta {
+    #[default]
+    None,
+    Heading {
+        level: u8,
+        text: String,
+    },
+    CodeContent {
+        block_id: usize,
+    },
+    SlideBreak,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct Line {
     pub spans: Vec<StyledSpan>,
+    pub meta: LineMeta,
 }
 
 impl Line {
     pub fn empty() -> Self {
-        Line { spans: vec![] }
+        Line {
+            spans: vec![],
+            meta: LineMeta::None,
+        }
     }
 
     pub fn display_width(&self) -> usize {
         self.spans.iter().map(|s| s.text.chars().count()).sum()
     }
+}
+
+/// Raw code block content for clipboard copy
+#[allow(dead_code)]
+pub struct CodeBlockContent {
+    pub language: String,
+    pub content: String,
+}
+
+/// Metadata returned alongside rendered lines
+pub struct DocumentInfo {
+    pub code_blocks: Vec<CodeBlockContent>,
 }
 
 pub fn wrap_lines(lines: &[Line], width: usize) -> Vec<Line> {
@@ -38,19 +69,21 @@ pub fn wrap_lines(lines: &[Line], width: usize) -> Vec<Line> {
     }
     let mut result = Vec::new();
     for line in lines {
-        if line.spans.is_empty() {
-            result.push(Line::empty());
-        } else if line.display_width() <= width {
+        if line.spans.is_empty() || line.display_width() <= width {
             result.push(line.clone());
         } else {
-            result.extend(word_wrap(line, width));
+            let mut wrapped = word_wrap(line, width);
+            // Propagate metadata to first wrapped line only
+            if let Some(first) = wrapped.first_mut() {
+                first.meta = line.meta.clone();
+            }
+            result.extend(wrapped);
         }
     }
     result
 }
 
 fn word_wrap(line: &Line, width: usize) -> Vec<Line> {
-    // Split spans into word/whitespace segments
     let mut segments: Vec<StyledSpan> = Vec::new();
     for span in &line.spans {
         let mut chars = span.text.chars().peekable();
@@ -85,7 +118,6 @@ fn word_wrap(line: &Line, width: usize) -> Vec<Line> {
             .unwrap_or(false);
 
         if !is_ws && col + seg_width > width && col > 0 {
-            // Remove trailing whitespace from current line
             if let Some(last) = current.last()
                 && last.text.chars().all(|c| c.is_whitespace())
             {
@@ -93,16 +125,15 @@ fn word_wrap(line: &Line, width: usize) -> Vec<Line> {
             }
             lines.push(Line {
                 spans: std::mem::take(&mut current),
+                meta: LineMeta::None,
             });
             col = 0;
         }
 
-        // Skip leading whitespace on continuation lines
         if col == 0 && is_ws && !lines.is_empty() {
             continue;
         }
 
-        // Handle words longer than width
         if !is_ws && seg_width > width && col == 0 {
             let chars: Vec<char> = seg.text.chars().collect();
             let mut i = 0;
@@ -119,6 +150,7 @@ fn word_wrap(line: &Line, width: usize) -> Vec<Line> {
                 if col >= width && i < chars.len() {
                     lines.push(Line {
                         spans: std::mem::take(&mut current),
+                        meta: LineMeta::None,
                     });
                     col = 0;
                 }
@@ -134,7 +166,10 @@ fn word_wrap(line: &Line, width: usize) -> Vec<Line> {
     }
 
     if !current.is_empty() {
-        lines.push(Line { spans: current });
+        lines.push(Line {
+            spans: current,
+            meta: LineMeta::None,
+        });
     }
 
     if lines.is_empty() {

@@ -60,6 +60,26 @@ pub struct Theme {
     pub search_current_fg: Color,
     pub search_no_match: Color,
 
+    // Overlays (TOC, link picker, fuzzy search)
+    pub overlay_bg: Color,
+    pub overlay_border: Color,
+    pub overlay_selected_bg: Color,
+    pub overlay_selected_fg: Color,
+    pub overlay_text: Color,
+    pub overlay_muted: Color,
+
+    // Images
+    pub image_fg: Color,
+
+    // Slide mode
+    pub slide_indicator: Color,
+
+    // Math
+    pub math_fg: Color,
+
+    // Line numbers
+    pub line_number: Color,
+
     is_dark: bool,
 }
 
@@ -254,6 +274,58 @@ impl Theme {
                 g: 139,
                 b: 168,
             },
+
+            overlay_bg: Color::Rgb {
+                r: 36,
+                g: 39,
+                b: 58,
+            },
+            overlay_border: Color::Rgb {
+                r: 91,
+                g: 96,
+                b: 120,
+            },
+            overlay_selected_bg: Color::Rgb {
+                r: 68,
+                g: 71,
+                b: 90,
+            },
+            overlay_selected_fg: Color::Rgb {
+                r: 205,
+                g: 214,
+                b: 244,
+            },
+            overlay_text: Color::Rgb {
+                r: 186,
+                g: 194,
+                b: 222,
+            },
+            overlay_muted: Color::Rgb {
+                r: 108,
+                g: 112,
+                b: 134,
+            },
+
+            image_fg: Color::Rgb {
+                r: 166,
+                g: 227,
+                b: 161,
+            },
+            slide_indicator: Color::Rgb {
+                r: 249,
+                g: 226,
+                b: 175,
+            },
+            math_fg: Color::Rgb {
+                r: 242,
+                g: 205,
+                b: 147,
+            },
+            line_number: Color::Rgb {
+                r: 68,
+                g: 71,
+                b: 90,
+            },
         }
     }
 
@@ -446,6 +518,58 @@ impl Theme {
                 r: 210,
                 g: 15,
                 b: 57,
+            },
+
+            overlay_bg: Color::Rgb {
+                r: 230,
+                g: 233,
+                b: 239,
+            },
+            overlay_border: Color::Rgb {
+                r: 172,
+                g: 176,
+                b: 190,
+            },
+            overlay_selected_bg: Color::Rgb {
+                r: 188,
+                g: 192,
+                b: 204,
+            },
+            overlay_selected_fg: Color::Rgb {
+                r: 76,
+                g: 79,
+                b: 105,
+            },
+            overlay_text: Color::Rgb {
+                r: 76,
+                g: 79,
+                b: 105,
+            },
+            overlay_muted: Color::Rgb {
+                r: 140,
+                g: 143,
+                b: 161,
+            },
+
+            image_fg: Color::Rgb {
+                r: 64,
+                g: 160,
+                b: 43,
+            },
+            slide_indicator: Color::Rgb {
+                r: 223,
+                g: 142,
+                b: 29,
+            },
+            math_fg: Color::Rgb {
+                r: 179,
+                g: 82,
+                b: 2,
+            },
+            line_number: Color::Rgb {
+                r: 172,
+                g: 176,
+                b: 190,
             },
         }
     }

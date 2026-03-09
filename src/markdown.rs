@@ -5,7 +5,7 @@ use syntect::highlighting::{FontStyle, Style as SynStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
-use crate::style::{Line, Style, StyledSpan};
+use crate::style::{CodeBlockContent, DocumentInfo, Line, LineMeta, Style, StyledSpan};
 use crate::theme::Theme;
 
 struct Renderer<'a> {
@@ -13,6 +13,7 @@ struct Renderer<'a> {
     lines: Vec<Line>,
     current_spans: Vec<StyledSpan>,
     width: usize,
+    line_numbers: bool,
 
     // Inline style state
     bold: bool,
@@ -21,10 +22,12 @@ struct Renderer<'a> {
 
     // Block state
     heading_level: Option<HeadingLevel>,
+    heading_text: String,
     in_blockquote: bool,
     in_code_block: bool,
     code_block_lang: String,
     code_block_content: String,
+    code_block_id: usize,
 
     // List state
     list_stack: Vec<ListKind>,
@@ -43,6 +46,14 @@ struct Renderer<'a> {
     in_link: bool,
     link_url: String,
 
+    // Image state
+    in_image: bool,
+    image_url: String,
+    image_alt: String,
+
+    // Document info
+    code_blocks: Vec<CodeBlockContent>,
+
     // Syntect (loaded once)
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
@@ -55,20 +66,23 @@ enum ListKind {
 }
 
 impl<'a> Renderer<'a> {
-    fn new(width: usize, theme: &'a Theme) -> Self {
+    fn new(width: usize, theme: &'a Theme, line_numbers: bool) -> Self {
         Renderer {
             theme,
             lines: Vec::new(),
             current_spans: Vec::new(),
             width,
+            line_numbers,
             bold: false,
             italic: false,
             strikethrough: false,
             heading_level: None,
+            heading_text: String::new(),
             in_blockquote: false,
             in_code_block: false,
             code_block_lang: String::new(),
             code_block_content: String::new(),
+            code_block_id: 0,
             list_stack: Vec::new(),
             item_has_nested_list: false,
             in_table: false,
@@ -80,6 +94,10 @@ impl<'a> Renderer<'a> {
             table_current_row: Vec::new(),
             in_link: false,
             link_url: String::new(),
+            in_image: false,
+            image_url: String::new(),
+            image_alt: String::new(),
+            code_blocks: Vec::new(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
         }
@@ -143,6 +161,10 @@ impl<'a> Renderer<'a> {
     }
 
     fn flush_line(&mut self) {
+        self.flush_line_with_meta(LineMeta::None);
+    }
+
+    fn flush_line_with_meta(&mut self, meta: LineMeta) {
         if !self.current_spans.is_empty() {
             let mut spans = Vec::new();
             if self.in_blockquote {
@@ -155,12 +177,11 @@ impl<'a> Renderer<'a> {
                 });
             }
             spans.append(&mut self.current_spans);
-            self.lines.push(Line { spans });
+            self.lines.push(Line { spans, meta });
         }
     }
 
     fn push_empty_line(&mut self) {
-        // Avoid consecutive empty lines
         if let Some(last) = self.lines.last()
             && last.spans.is_empty()
         {
@@ -175,6 +196,7 @@ impl<'a> Renderer<'a> {
                         ..Default::default()
                     },
                 }],
+                meta: LineMeta::None,
             });
         } else {
             self.lines.push(Line::empty());
@@ -187,6 +209,17 @@ impl<'a> Renderer<'a> {
         let code_bg = self.theme.code_bg;
         let border_fg = self.theme.code_border;
         let label_fg = self.theme.code_label;
+        let block_id = self.code_block_id;
+        self.code_block_id += 1;
+
+        // Save raw content for clipboard copy
+        self.code_blocks.push(CodeBlockContent {
+            language: lang.clone(),
+            content: code.clone(),
+        });
+
+        // Check for special diagram blocks
+        let is_diagram = matches!(lang.as_str(), "mermaid" | "plantuml" | "dot" | "graphviz");
 
         let syntax = if lang.is_empty() {
             self.syntax_set.find_syntax_plain_text()
@@ -203,26 +236,37 @@ impl<'a> Renderer<'a> {
             .unwrap_or_else(|| &self.theme_set.themes["base16-ocean.dark"]);
         let mut highlighter = HighlightLines::new(syntax, syntect_theme);
 
-        // Measure content to size the box
         let code_lines: Vec<&str> = code.lines().collect();
+        let line_num_width = if self.line_numbers {
+            code_lines.len().to_string().len()
+        } else {
+            0
+        };
         let max_line_len = code_lines
             .iter()
             .map(|l| l.chars().count())
             .max()
             .unwrap_or(0);
-        let content_width = max_line_len.max(40);
-        // Inner width between ╭/│ and ╮/│: " " + content + " "
+        let content_width = (max_line_len
+            + if self.line_numbers {
+                line_num_width + 3
+            } else {
+                0
+            })
+        .max(40);
         let inner_width = content_width + 2;
 
-        // Language label
-        let label = if lang.is_empty() {
+        // Diagram label or language label
+        let label = if is_diagram {
+            format!(" {} (diagram) ", lang)
+        } else if lang.is_empty() {
             String::new()
         } else {
             format!(" {} ", lang)
         };
         let label_len = label.chars().count();
 
-        // Top border: "  ╭─ lang ──...──╮"
+        // Top border
         let dashes_after = inner_width.saturating_sub(1 + label_len);
         let mut top_spans = vec![StyledSpan {
             text: "  ╭─".to_string(),
@@ -231,7 +275,7 @@ impl<'a> Renderer<'a> {
                 ..Default::default()
             },
         }];
-        if !lang.is_empty() {
+        if !label.is_empty() {
             top_spans.push(StyledSpan {
                 text: label,
                 style: Style {
@@ -247,10 +291,13 @@ impl<'a> Renderer<'a> {
                 ..Default::default()
             },
         });
-        self.lines.push(Line { spans: top_spans });
+        self.lines.push(Line {
+            spans: top_spans,
+            meta: LineMeta::CodeContent { block_id },
+        });
 
-        // Code lines with left border, syntax highlighting, padding, and right border
-        for line_str in LinesWithEndings::from(&code) {
+        // Code lines
+        for (line_num, line_str) in LinesWithEndings::from(&code).enumerate() {
             let mut spans = vec![
                 StyledSpan {
                     text: "  │".to_string(),
@@ -268,7 +315,21 @@ impl<'a> Renderer<'a> {
                 },
             ];
 
+            // Line numbers
             let mut char_count = 0;
+            if self.line_numbers {
+                let num_str = format!("{:>width$} │ ", line_num + 1, width = line_num_width);
+                char_count += num_str.chars().count();
+                spans.push(StyledSpan {
+                    text: num_str,
+                    style: Style {
+                        fg: Some(self.theme.line_number),
+                        bg: Some(code_bg),
+                        ..Default::default()
+                    },
+                });
+            }
+
             if let Ok(ranges) = highlighter.highlight_line(line_str, &self.syntax_set) {
                 for (syn_style, text) in ranges {
                     let trimmed = text.trim_end_matches('\n').trim_end_matches('\r');
@@ -294,7 +355,6 @@ impl<'a> Renderer<'a> {
                 });
             }
 
-            // Right padding (fill to content_width) + right margin
             let padding = content_width.saturating_sub(char_count) + 1;
             spans.push(StyledSpan {
                 text: " ".repeat(padding),
@@ -311,7 +371,10 @@ impl<'a> Renderer<'a> {
                 },
             });
 
-            self.lines.push(Line { spans });
+            self.lines.push(Line {
+                spans,
+                meta: LineMeta::CodeContent { block_id },
+            });
         }
 
         // Bottom border
@@ -323,6 +386,7 @@ impl<'a> Renderer<'a> {
                     ..Default::default()
                 },
             }],
+            meta: LineMeta::CodeContent { block_id },
         });
     }
 
@@ -339,7 +403,6 @@ impl<'a> Renderer<'a> {
             return;
         }
 
-        // Measure natural column widths
         let mut col_widths = vec![0usize; num_cols];
         for row in &all_rows {
             for (i, cell) in row.iter().enumerate() {
@@ -350,7 +413,6 @@ impl<'a> Renderer<'a> {
             }
         }
 
-        // Constrain to available width
         let overhead = 3 + 3 * num_cols;
         let total_natural: usize = col_widths.iter().sum();
         let available = self.width.saturating_sub(overhead);
@@ -358,13 +420,11 @@ impl<'a> Renderer<'a> {
         if available > 0 && total_natural > available {
             let fair_share = available / num_cols;
             let mut fixed_width = 0usize;
-            let mut flex_natural = 0usize;
+            let flex_natural: usize = col_widths.iter().filter(|&&w| w > fair_share).sum();
 
             for &w in col_widths.iter() {
                 if w <= fair_share {
                     fixed_width += w;
-                } else {
-                    flex_natural += w;
                 }
             }
 
@@ -386,7 +446,6 @@ impl<'a> Renderer<'a> {
             }
         }
 
-        // Minimum column width
         for w in &mut col_widths {
             *w = (*w).max(3);
         }
@@ -396,7 +455,6 @@ impl<'a> Renderer<'a> {
             ..Default::default()
         };
 
-        // Helper: build a horizontal rule line
         let make_rule = |left: &str, mid: &str, right: &str, widths: &[usize]| -> Line {
             let mut s = format!("  {}", left);
             for (i, &w) in widths.iter().enumerate() {
@@ -411,17 +469,15 @@ impl<'a> Renderer<'a> {
                     text: s,
                     style: border_style.clone(),
                 }],
+                meta: LineMeta::None,
             }
         };
 
-        // Top border
         self.lines.push(make_rule("╭", "┬", "╮", &col_widths));
 
-        // Render each row (with multi-line cell support)
         for (row_idx, row) in all_rows.iter().enumerate() {
             let is_header = row_idx == 0;
 
-            // Wrap each cell into visual lines
             let wrapped_cells: Vec<Vec<Vec<StyledSpan>>> = row
                 .iter()
                 .enumerate()
@@ -482,7 +538,6 @@ impl<'a> Renderer<'a> {
                             style: Style::default(),
                         });
                     } else {
-                        // Empty line for this cell (other cells in the row are taller)
                         spans.push(StyledSpan {
                             text: format!(" {} ", " ".repeat(cw)),
                             style: Style::default(),
@@ -494,16 +549,17 @@ impl<'a> Renderer<'a> {
                         style: border_style.clone(),
                     });
                 }
-                self.lines.push(Line { spans });
+                self.lines.push(Line {
+                    spans,
+                    meta: LineMeta::None,
+                });
             }
 
-            // Separator after header and between body rows
             if row_idx + 1 < all_rows.len() {
                 self.lines.push(make_rule("├", "┼", "┤", &col_widths));
             }
         }
 
-        // Bottom border
         self.lines.push(make_rule("╰", "┴", "╯", &col_widths));
     }
 
@@ -517,7 +573,6 @@ impl<'a> Renderer<'a> {
 
             Event::Start(Tag::Heading { level, .. }) => {
                 if !self.lines.is_empty() {
-                    // Major sections (H1/H2) get a visible separator line
                     if matches!(level, HeadingLevel::H1 | HeadingLevel::H2) {
                         self.push_empty_line();
                         self.lines.push(Line {
@@ -529,6 +584,7 @@ impl<'a> Renderer<'a> {
                                     ..Default::default()
                                 },
                             }],
+                            meta: LineMeta::None,
                         });
                         self.push_empty_line();
                     } else {
@@ -536,7 +592,7 @@ impl<'a> Renderer<'a> {
                     }
                 }
                 self.heading_level = Some(level);
-                // Add a subtle level prefix for H3+
+                self.heading_text.clear();
                 match level {
                     HeadingLevel::H3 => {
                         self.push_span(
@@ -582,8 +638,19 @@ impl<'a> Renderer<'a> {
                 }
             }
             Event::End(TagEnd::Heading(level)) => {
-                self.flush_line();
-                // Add subtle underline decoration for H1
+                let heading_text = std::mem::take(&mut self.heading_text);
+                let lvl = match level {
+                    HeadingLevel::H1 => 1,
+                    HeadingLevel::H2 => 2,
+                    HeadingLevel::H3 => 3,
+                    HeadingLevel::H4 => 4,
+                    HeadingLevel::H5 => 5,
+                    HeadingLevel::H6 => 6,
+                };
+                self.flush_line_with_meta(LineMeta::Heading {
+                    level: lvl,
+                    text: heading_text,
+                });
                 if matches!(level, HeadingLevel::H1) {
                     let last_w = self.lines.last().map(|l| l.display_width()).unwrap_or(0);
                     if last_w > 0 {
@@ -596,6 +663,7 @@ impl<'a> Renderer<'a> {
                                     ..Default::default()
                                 },
                             }],
+                            meta: LineMeta::None,
                         });
                     }
                 }
@@ -633,9 +701,7 @@ impl<'a> Renderer<'a> {
             }
 
             Event::Start(Tag::List(ordered)) => {
-                // Flush any pending content so nested lists start on a new line
                 self.flush_line();
-                // Mark that the current item has a nested list
                 if !self.list_stack.is_empty() {
                     self.item_has_nested_list = true;
                 }
@@ -674,7 +740,6 @@ impl<'a> Renderer<'a> {
             }
             Event::End(TagEnd::Item) => {
                 self.flush_line();
-                // Only add spacing after top-level items that had nested content
                 if self.list_stack.len() <= 1 && self.item_has_nested_list {
                     self.push_empty_line();
                 }
@@ -690,10 +755,45 @@ impl<'a> Renderer<'a> {
                     &format!(" {}", url),
                     Style {
                         fg: Some(self.theme.link_url),
+                        link_url: Some(url),
                         ..Default::default()
                     },
                 );
                 self.in_link = false;
+            }
+
+            // Image handling
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                self.in_image = true;
+                self.image_url = dest_url.to_string();
+                self.image_alt.clear();
+            }
+            Event::End(TagEnd::Image) => {
+                let alt = if self.image_alt.is_empty() {
+                    "image".to_string()
+                } else {
+                    std::mem::take(&mut self.image_alt)
+                };
+                let url = std::mem::take(&mut self.image_url);
+                self.push_span(
+                    &format!("[img: {}]", alt),
+                    Style {
+                        fg: Some(self.theme.image_fg),
+                        dim: true,
+                        ..Default::default()
+                    },
+                );
+                if !url.is_empty() {
+                    self.push_span(
+                        &format!(" ({})", url),
+                        Style {
+                            fg: Some(self.theme.overlay_muted),
+                            dim: true,
+                            ..Default::default()
+                        },
+                    );
+                }
+                self.in_image = false;
             }
 
             Event::Start(Tag::Table(alignments)) => {
@@ -734,7 +834,9 @@ impl<'a> Renderer<'a> {
             }
 
             Event::Text(text) => {
-                if self.in_table {
+                if self.in_image {
+                    self.image_alt.push_str(&text);
+                } else if self.in_table {
                     let style = self.current_style();
                     self.table_cell_spans.push(StyledSpan {
                         text: text.to_string(),
@@ -746,14 +848,24 @@ impl<'a> Renderer<'a> {
                     let mut style = self.current_style();
                     style.fg = Some(self.theme.link);
                     style.underline = true;
+                    style.link_url = Some(self.link_url.clone());
                     self.push_span(&text, style);
+                    if self.heading_level.is_some() {
+                        self.heading_text.push_str(&text);
+                    }
                 } else {
+                    if self.heading_level.is_some() {
+                        self.heading_text.push_str(&text);
+                    }
                     let style = self.current_style();
                     self.push_span(&text, style);
                 }
             }
 
             Event::Code(code) => {
+                if self.heading_level.is_some() {
+                    self.heading_text.push_str(&code);
+                }
                 let tick_style = Style {
                     fg: Some(self.theme.inline_code_tick),
                     bg: Some(self.theme.inline_code_bg),
@@ -802,6 +914,7 @@ impl<'a> Renderer<'a> {
                             ..Default::default()
                         },
                     }],
+                    meta: LineMeta::SlideBreak,
                 });
                 self.push_empty_line();
             }
@@ -821,20 +934,39 @@ impl<'a> Renderer<'a> {
                 );
             }
 
+            // Math rendering
+            Event::InlineMath(math) => {
+                let rendered = render_math(&math);
+                self.push_span(
+                    &rendered,
+                    Style {
+                        fg: Some(self.theme.math_fg),
+                        ..Default::default()
+                    },
+                );
+            }
+            Event::DisplayMath(math) => {
+                self.flush_line();
+                let rendered = render_math(&math);
+                for math_line in rendered.lines() {
+                    self.push_span(
+                        &format!("    {}", math_line),
+                        Style {
+                            fg: Some(self.theme.math_fg),
+                            ..Default::default()
+                        },
+                    );
+                    self.flush_line();
+                }
+                self.push_empty_line();
+            }
+
             _ => {}
         }
     }
 }
 
-/// A wrapping unit: either a whitespace segment or a group of consecutive
-/// non-whitespace segments (e.g. `` ` `` + `code` + `` ` `` stays together).
-enum WrapUnit {
-    Whitespace(StyledSpan),
-    Word(Vec<StyledSpan>, usize), // segments, total char width
-}
-
-/// Wrap a cell's styled spans into multiple visual lines fitting within `width`.
-/// Groups consecutive non-whitespace segments so backticks stay with their content.
+/// Word-wrap a table cell
 fn wrap_cell(spans: &[StyledSpan], width: usize) -> Vec<Vec<StyledSpan>> {
     if width == 0 {
         return vec![spans.to_vec()];
@@ -845,7 +977,6 @@ fn wrap_cell(spans: &[StyledSpan], width: usize) -> Vec<Vec<StyledSpan>> {
         return vec![spans.to_vec()];
     }
 
-    // Split spans into word/whitespace segments
     let mut segments: Vec<StyledSpan> = Vec::new();
     for span in spans {
         let mut chars = span.text.chars().peekable();
@@ -866,7 +997,11 @@ fn wrap_cell(spans: &[StyledSpan], width: usize) -> Vec<Vec<StyledSpan>> {
         }
     }
 
-    // Group consecutive non-whitespace segments into word units
+    enum WrapUnit {
+        Whitespace(StyledSpan),
+        Word(Vec<StyledSpan>, usize),
+    }
+
     let mut units: Vec<WrapUnit> = Vec::new();
     let mut word_segs: Vec<StyledSpan> = Vec::new();
     let mut word_width: usize = 0;
@@ -888,7 +1023,6 @@ fn wrap_cell(spans: &[StyledSpan], width: usize) -> Vec<Vec<StyledSpan>> {
         units.push(WrapUnit::Word(word_segs, word_width));
     }
 
-    // Wrap using word units
     let mut lines: Vec<Vec<StyledSpan>> = Vec::new();
     let mut current: Vec<StyledSpan> = Vec::new();
     let mut col = 0;
@@ -897,15 +1031,13 @@ fn wrap_cell(spans: &[StyledSpan], width: usize) -> Vec<Vec<StyledSpan>> {
         match unit {
             WrapUnit::Whitespace(seg) => {
                 if col == 0 && !lines.is_empty() {
-                    continue; // skip leading whitespace on continuation lines
+                    continue;
                 }
                 col += seg.text.chars().count();
                 current.push(seg.clone());
             }
             WrapUnit::Word(segs, ww) => {
-                // Would overflow: wrap to next line
                 if col + ww > width && col > 0 {
-                    // Remove trailing whitespace
                     if let Some(last) = current.last()
                         && last.text.chars().all(|c| c.is_whitespace())
                     {
@@ -916,13 +1048,11 @@ fn wrap_cell(spans: &[StyledSpan], width: usize) -> Vec<Vec<StyledSpan>> {
                 }
 
                 if *ww <= width {
-                    // Word group fits on a line
                     for seg in segs {
                         col += seg.text.chars().count();
                         current.push(seg.clone());
                     }
                 } else {
-                    // Word group wider than column: character-level break
                     for seg in segs {
                         let chars: Vec<char> = seg.text.chars().collect();
                         let mut i = 0;
@@ -968,13 +1098,249 @@ fn syntect_to_style(syn: SynStyle) -> Style {
     }
 }
 
-pub fn render(input: &str, width: usize, theme: &Theme) -> Vec<Line> {
-    let mut renderer = Renderer::new(width, theme);
+/// Convert basic LaTeX math to Unicode approximation
+pub fn render_math(latex: &str) -> String {
+    let mut s = latex.to_string();
+
+    let replacements = [
+        // Greek lowercase
+        ("\\alpha", "α"),
+        ("\\beta", "β"),
+        ("\\gamma", "γ"),
+        ("\\delta", "δ"),
+        ("\\epsilon", "ε"),
+        ("\\varepsilon", "ε"),
+        ("\\zeta", "ζ"),
+        ("\\eta", "η"),
+        ("\\theta", "θ"),
+        ("\\iota", "ι"),
+        ("\\kappa", "κ"),
+        ("\\lambda", "λ"),
+        ("\\mu", "μ"),
+        ("\\nu", "ν"),
+        ("\\xi", "ξ"),
+        ("\\pi", "π"),
+        ("\\rho", "ρ"),
+        ("\\sigma", "σ"),
+        ("\\tau", "τ"),
+        ("\\upsilon", "υ"),
+        ("\\phi", "φ"),
+        ("\\varphi", "φ"),
+        ("\\chi", "χ"),
+        ("\\psi", "ψ"),
+        ("\\omega", "ω"),
+        // Greek uppercase
+        ("\\Gamma", "Γ"),
+        ("\\Delta", "Δ"),
+        ("\\Theta", "Θ"),
+        ("\\Lambda", "Λ"),
+        ("\\Xi", "Ξ"),
+        ("\\Pi", "Π"),
+        ("\\Sigma", "Σ"),
+        ("\\Phi", "Φ"),
+        ("\\Psi", "Ψ"),
+        ("\\Omega", "Ω"),
+        // Operators
+        ("\\sum", "∑"),
+        ("\\prod", "∏"),
+        ("\\int", "∫"),
+        ("\\iint", "∬"),
+        ("\\iiint", "∭"),
+        ("\\oint", "∮"),
+        ("\\infty", "∞"),
+        ("\\partial", "∂"),
+        ("\\nabla", "∇"),
+        ("\\pm", "±"),
+        ("\\mp", "∓"),
+        ("\\times", "×"),
+        ("\\div", "÷"),
+        ("\\cdot", "·"),
+        ("\\circ", "∘"),
+        ("\\bullet", "•"),
+        ("\\star", "⋆"),
+        // Relations
+        ("\\leq", "≤"),
+        ("\\geq", "≥"),
+        ("\\neq", "≠"),
+        ("\\approx", "≈"),
+        ("\\equiv", "≡"),
+        ("\\sim", "∼"),
+        ("\\simeq", "≃"),
+        ("\\cong", "≅"),
+        ("\\propto", "∝"),
+        ("\\ll", "≪"),
+        ("\\gg", "≫"),
+        // Set theory
+        ("\\subset", "⊂"),
+        ("\\supset", "⊃"),
+        ("\\subseteq", "⊆"),
+        ("\\supseteq", "⊇"),
+        ("\\in", "∈"),
+        ("\\notin", "∉"),
+        ("\\cup", "∪"),
+        ("\\cap", "∩"),
+        ("\\emptyset", "∅"),
+        ("\\varnothing", "∅"),
+        // Logic
+        ("\\forall", "∀"),
+        ("\\exists", "∃"),
+        ("\\nexists", "∄"),
+        ("\\neg", "¬"),
+        ("\\land", "∧"),
+        ("\\lor", "∨"),
+        ("\\implies", "⟹"),
+        ("\\iff", "⟺"),
+        // Arrows
+        ("\\rightarrow", "→"),
+        ("\\leftarrow", "←"),
+        ("\\Rightarrow", "⇒"),
+        ("\\Leftarrow", "⇐"),
+        ("\\leftrightarrow", "↔"),
+        ("\\Leftrightarrow", "⇔"),
+        ("\\uparrow", "↑"),
+        ("\\downarrow", "↓"),
+        ("\\mapsto", "↦"),
+        ("\\to", "→"),
+        // Misc
+        ("\\sqrt", "√"),
+        ("\\ldots", "…"),
+        ("\\cdots", "⋯"),
+        ("\\vdots", "⋮"),
+        ("\\ddots", "⋱"),
+        ("\\langle", "⟨"),
+        ("\\rangle", "⟩"),
+        ("\\lfloor", "⌊"),
+        ("\\rfloor", "⌋"),
+        ("\\lceil", "⌈"),
+        ("\\rceil", "⌉"),
+        ("\\|", "‖"),
+        ("\\{", "{"),
+        ("\\}", "}"),
+        ("\\,", " "),
+        ("\\;", " "),
+        ("\\!", ""),
+        ("\\quad", "  "),
+        ("\\qquad", "    "),
+    ];
+
+    // Apply longest matches first (already sorted by length within groups)
+    for (from, to) in &replacements {
+        s = s.replace(from, to);
+    }
+
+    // Superscript digits
+    s = s
+        .replace("^{0}", "⁰")
+        .replace("^{1}", "¹")
+        .replace("^{2}", "²")
+        .replace("^{3}", "³")
+        .replace("^{4}", "⁴")
+        .replace("^{5}", "⁵")
+        .replace("^{6}", "⁶")
+        .replace("^{7}", "⁷")
+        .replace("^{8}", "⁸")
+        .replace("^{9}", "⁹")
+        .replace("^{n}", "ⁿ")
+        .replace("^{i}", "ⁱ")
+        .replace("^{+}", "⁺")
+        .replace("^{-}", "⁻")
+        .replace("^{=}", "⁼")
+        .replace("^{(}", "⁽")
+        .replace("^{)}", "⁾");
+
+    // Single-char superscripts
+    s = s
+        .replace("^0", "⁰")
+        .replace("^1", "¹")
+        .replace("^2", "²")
+        .replace("^3", "³")
+        .replace("^4", "⁴")
+        .replace("^5", "⁵")
+        .replace("^6", "⁶")
+        .replace("^7", "⁷")
+        .replace("^8", "⁸")
+        .replace("^9", "⁹")
+        .replace("^n", "ⁿ")
+        .replace("^i", "ⁱ");
+
+    // Subscript digits
+    s = s
+        .replace("_{0}", "₀")
+        .replace("_{1}", "₁")
+        .replace("_{2}", "₂")
+        .replace("_{3}", "₃")
+        .replace("_{4}", "₄")
+        .replace("_{5}", "₅")
+        .replace("_{6}", "₆")
+        .replace("_{7}", "₇")
+        .replace("_{8}", "₈")
+        .replace("_{9}", "₉")
+        .replace("_{i}", "ᵢ")
+        .replace("_{j}", "ⱼ")
+        .replace("_{n}", "ₙ");
+
+    // Single-char subscripts
+    s = s
+        .replace("_0", "₀")
+        .replace("_1", "₁")
+        .replace("_2", "₂")
+        .replace("_3", "₃")
+        .replace("_4", "₄")
+        .replace("_5", "₅")
+        .replace("_6", "₆")
+        .replace("_7", "₇")
+        .replace("_8", "₈")
+        .replace("_9", "₉");
+
+    // Simple \frac{a}{b} -> a/b
+    while let Some(idx) = s.find("\\frac{") {
+        let after = &s[idx + 6..];
+        if let Some(close1) = after.find('}') {
+            let numer = &after[..close1];
+            let rest = &after[close1 + 1..];
+            if rest.starts_with('{')
+                && let Some(close2) = rest[1..].find('}')
+            {
+                let denom = &rest[1..1 + close2];
+                let end_pos = idx + 6 + close1 + 1 + 1 + close2 + 1;
+                s = format!("{}{}/{}{}", &s[..idx], numer, denom, &s[end_pos..]);
+                continue;
+            }
+        }
+        break;
+    }
+
+    // Clean up remaining \text{...} -> ...
+    while let Some(idx) = s.find("\\text{") {
+        let after = &s[idx + 6..];
+        if let Some(close) = after.find('}') {
+            let text = &after[..close];
+            let end_pos = idx + 6 + close + 1;
+            s = format!("{}{}{}", &s[..idx], text, &s[end_pos..]);
+            continue;
+        }
+        break;
+    }
+
+    // Remove remaining curly braces that were just grouping
+    s = s.replace(['{', '}'], "");
+
+    s
+}
+
+pub fn render(
+    input: &str,
+    width: usize,
+    theme: &Theme,
+    line_numbers: bool,
+) -> (Vec<Line>, DocumentInfo) {
+    let mut renderer = Renderer::new(width, theme, line_numbers);
 
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_MATH);
 
     let parser = Parser::new_ext(input, options);
 
@@ -982,8 +1348,11 @@ pub fn render(input: &str, width: usize, theme: &Theme) -> Vec<Line> {
         renderer.process(event);
     }
 
-    // Flush any remaining content
     renderer.flush_line();
 
-    renderer.lines
+    let doc_info = DocumentInfo {
+        code_blocks: renderer.code_blocks,
+    };
+
+    (renderer.lines, doc_info)
 }

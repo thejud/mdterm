@@ -20,20 +20,28 @@ cargo test               # run tests (none exist yet)
 
 ## Architecture
 
-Four source files in `src/`:
+Six source files in `src/`:
 
-- **main.rs** — Entry point. Parses CLI args, reads the markdown file, and dispatches to either the interactive viewer (if stdout is a TTY) or plain line output (if piped).
-- **markdown.rs** — Stateful markdown renderer. Processes `pulldown-cmark` events into `Vec<Line>` (styled text lines). Handles syntax highlighting for code blocks via `syntect` (base16-ocean.dark theme). Tracks inline formatting state (bold/italic/strikethrough) and block context (headings, lists, blockquotes, code blocks).
-- **style.rs** — Data types (`Style`, `StyledSpan`, `Line`) and word-wrapping logic (`wrap_lines`). Wrapping splits spans into word/whitespace segments and handles long-word character-level breaks.
-- **viewer.rs** — Interactive TUI using `crossterm`. Manages raw mode, alternate screen, mouse capture, keyboard/mouse event loop, viewport scrolling, and responsive re-wrapping on terminal resize. Uses RAII (`TerminalGuard`) for terminal cleanup on panic.
+- **main.rs** — Entry point. Uses `clap` for CLI arg parsing, handles stdin/file input, dispatches to viewer (TTY), piped output, or HTML export.
+- **markdown.rs** — Stateful markdown renderer. Processes `pulldown-cmark` events into `(Vec<Line>, DocumentInfo)`. Handles syntax highlighting, math rendering (LaTeX→Unicode), image placeholders, line numbers, and metadata tracking (headings, code blocks, slide breaks).
+- **style.rs** — Data types (`Style`, `StyledSpan`, `Line`, `LineMeta`, `DocumentInfo`) and word-wrapping logic. `LineMeta` tracks heading/code-block/slide metadata through wrapping.
+- **viewer.rs** — Interactive TUI with multiple view modes (Normal, Search, TOC, LinkPicker, FuzzyHeading). Supports slide mode, follow mode, multi-file switching, clipboard operations, regex search, and overlay panels.
+- **theme.rs** — Two complete themes (dark/light) with 40+ color fields including overlay, math, image, and line number colors.
+- **config.rs** — Loads `~/.config/mdterm/config.toml` for persistent settings (theme, line_numbers).
+- **export.rs** — HTML export with inline CSS matching the current theme.
 
-**Data flow:** markdown text → `pulldown-cmark` events → `Renderer` (markdown.rs) → `Vec<Line>` → `wrap_lines` (style.rs) → terminal output (viewer.rs)
+**Data flow:** markdown text → `pulldown-cmark` events → `Renderer` (markdown.rs) → `(Vec<Line>, DocumentInfo)` → `wrap_lines` (style.rs) → terminal/HTML output
 
 ## Key Dependencies
 
-- **pulldown-cmark 0.11** — CommonMark parser (events/AST)
+- **pulldown-cmark 0.11** — CommonMark parser (events/AST, math support)
 - **crossterm 0.28** — Terminal control (raw mode, colors, events)
 - **syntect 5** — Syntax highlighting for code blocks
+- **clap 4** — CLI argument parsing
+- **regex 1** — Regex search support
+- **open 5** — Open URLs in browser (link picker)
+- **serde + toml** — Config file parsing
+- **dirs 5** — Platform config directory lookup
 
 ## Rust Edition
 
