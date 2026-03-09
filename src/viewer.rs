@@ -163,8 +163,16 @@ fn render_frame(
                 col += span.text.chars().count();
             }
             if col < content_width {
-                let line_bg = line.spans.last().and_then(|s| s.style.bg);
-                if let Some(bg) = line_bg {
+                // Only extend background when all spans share the same bg
+                // (e.g. code block lines). Avoids inline code bg bleeding.
+                let common_bg = line.spans.first().and_then(|s| s.style.bg).and_then(|bg| {
+                    if line.spans.iter().all(|s| s.style.bg == Some(bg)) {
+                        Some(bg)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(bg) = common_bg {
                     queue!(
                         stdout,
                         SetBackgroundColor(bg),

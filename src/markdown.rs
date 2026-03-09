@@ -26,6 +26,7 @@ struct Renderer {
 
     // List state
     list_stack: Vec<ListKind>,
+    item_has_nested_list: bool,
 
     // Table state
     in_table: bool,
@@ -66,6 +67,7 @@ impl Renderer {
             code_block_lang: String::new(),
             code_block_content: String::new(),
             list_stack: Vec::new(),
+            item_has_nested_list: false,
             in_table: false,
             table_alignments: Vec::new(),
             table_head: Vec::new(),
@@ -133,6 +135,12 @@ impl Renderer {
             spans.append(&mut self.current_spans);
             self.lines.push(Line { spans });
         }
+    }
+
+    fn push_spacing(&mut self) {
+        // Push two empty lines for extra spacing between major blocks
+        self.push_empty_line();
+        self.lines.push(Line::empty());
     }
 
     fn push_empty_line(&mut self) {
@@ -490,6 +498,10 @@ impl Renderer {
             }
 
             Event::Start(Tag::Heading { level, .. }) => {
+                // Extra spacing before headings for visual separation
+                if !self.lines.is_empty() {
+                    self.push_spacing();
+                }
                 self.heading_level = Some(level);
             }
             Event::End(TagEnd::Heading(_)) => {
@@ -510,7 +522,7 @@ impl Renderer {
             }
             Event::End(TagEnd::BlockQuote) => {
                 self.in_blockquote = false;
-                self.push_empty_line();
+                self.push_spacing();
             }
 
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -524,23 +536,32 @@ impl Renderer {
             Event::End(TagEnd::CodeBlock) => {
                 self.emit_code_block();
                 self.in_code_block = false;
-                self.push_empty_line();
+                self.push_spacing();
             }
 
-            Event::Start(Tag::List(ordered)) => match ordered {
-                Some(start) => self.list_stack.push(ListKind::Ordered(start)),
-                None => self.list_stack.push(ListKind::Unordered),
-            },
+            Event::Start(Tag::List(ordered)) => {
+                // Flush any pending content so nested lists start on a new line
+                self.flush_line();
+                // Mark that the current item has a nested list
+                if !self.list_stack.is_empty() {
+                    self.item_has_nested_list = true;
+                }
+                match ordered {
+                    Some(start) => self.list_stack.push(ListKind::Ordered(start)),
+                    None => self.list_stack.push(ListKind::Unordered),
+                }
+            }
             Event::End(TagEnd::List(_)) => {
                 self.list_stack.pop();
                 if self.list_stack.is_empty() {
-                    self.push_empty_line();
+                    self.push_spacing();
                 }
             }
 
             Event::Start(Tag::Item) => {
+                self.item_has_nested_list = false;
                 let depth = self.list_stack.len().saturating_sub(1);
-                let indent = "  ".repeat(depth);
+                let indent = "    ".repeat(depth);
                 let bullet = match self.list_stack.last_mut() {
                     Some(ListKind::Unordered) => format!("{}  • ", indent),
                     Some(ListKind::Ordered(n)) => {
@@ -560,6 +581,10 @@ impl Renderer {
             }
             Event::End(TagEnd::Item) => {
                 self.flush_line();
+                // Only add spacing after top-level items that had nested content
+                if self.list_stack.len() <= 1 && self.item_has_nested_list {
+                    self.push_empty_line();
+                }
             }
 
             Event::Start(Tag::Link { dest_url, .. }) => {
@@ -590,7 +615,7 @@ impl Renderer {
                 self.table_alignments.clear();
                 self.table_head.clear();
                 self.table_rows.clear();
-                self.push_empty_line();
+                self.push_spacing();
             }
             Event::Start(Tag::TableHead) => {
                 self.in_table_head = true;
