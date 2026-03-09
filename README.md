@@ -5,6 +5,7 @@ A terminal-based Markdown viewer written in Rust. Renders Markdown files with sy
 ## Features
 
 - **Interactive TUI** — Scroll, navigate with keyboard and mouse
+- **In-document search** — `/` to search, `n`/`N` to jump between matches, highlighted results
 - **Syntax highlighting** — Code blocks highlighted with the base16-ocean.dark theme
 - **Rich formatting** — Headings, bold, italic, strikethrough, lists, blockquotes, tables
 - **Word wrapping** — Responsive re-wrapping on terminal resize
@@ -40,7 +41,10 @@ mdterm README.md | less -R
 | `b` / `u` / `Page Up`        | Page up    |
 | `g` / `Home`                 | Go to top  |
 | `G` / `End`                  | Go to bottom |
-| `q` / `Esc` / `Ctrl+C`      | Quit       |
+| `/`                          | Search     |
+| `n` / `N`                    | Next / previous match |
+| `q` / `Ctrl+C`               | Quit       |
+| `Esc`                        | Clear search / Quit |
 | Mouse scroll                 | Scroll     |
 
 ## Building
