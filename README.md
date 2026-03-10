@@ -2,6 +2,14 @@
 
 A terminal-based Markdown viewer written in Rust. Renders Markdown files with syntax highlighting, styled formatting, and interactive navigation.
 
+## Screenshots
+
+| | |
+|---|---|
+| ![Demo](screenshots/demo.png) | ![Light Theme](screenshots/light.png) |
+| ![Math Rendering](screenshots/math.png) | ![Mermaid Diagrams](screenshots/mermaid.png) |
+| ![Search](screenshots/search.png) | |
+
 ## Features
 
 - **Interactive TUI** — Scroll, navigate with keyboard and mouse
@@ -141,6 +149,10 @@ Options:
 ```bash
 cargo build --release
 ```
+
+## Demo
+
+![Demo](demo.gif)
 
 ## License
 
