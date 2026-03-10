@@ -649,7 +649,9 @@ fn fetch_image_http(url: &str) -> Option<DynamicImage> {
 
 /// Extract the host portion from an HTTP(S) URL.
 fn extract_host(url: &str) -> Option<&str> {
-    let after_scheme = url.strip_prefix("https://").or(url.strip_prefix("http://"))?;
+    let after_scheme = url
+        .strip_prefix("https://")
+        .or(url.strip_prefix("http://"))?;
     let authority = after_scheme.split('/').next()?;
     // Strip optional userinfo (user:pass@)
     let host_port = authority.rsplit('@').next()?;
