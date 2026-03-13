@@ -58,9 +58,13 @@ pub fn run(opts: ViewerOptions) -> io::Result<()> {
             continue;
         }
 
-        // Dispatch all pending URLs as background fetches (non-blocking)
-        while let Some(url) = state.pending_image_urls.pop_front() {
-            state.image_cache.start_fetch(&url);
+        // Dispatch pending URLs as background fetches, capped at 10 concurrent
+        while state.image_cache.in_flight_count() < 10 {
+            if let Some(url) = state.pending_image_urls.pop_front() {
+                state.image_cache.start_fetch(&url);
+            } else {
+                break;
+            }
         }
 
         let timeout = if state.image_cache.has_in_flight() {
