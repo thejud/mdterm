@@ -297,15 +297,10 @@ impl ImageCache {
     /// Poll for completed background fetches. Returns true if any new images arrived.
     pub fn poll_completed(&mut self) -> bool {
         let mut any = false;
-        loop {
-            match self.receiver.try_recv() {
-                Ok((url, img)) => {
-                    self.in_flight.remove(&url);
-                    self.images.insert(url, img);
-                    any = true;
-                }
-                Err(_) => break,
-            }
+        while let Ok((url, img)) = self.receiver.try_recv() {
+            self.in_flight.remove(&url);
+            self.images.insert(url, img);
+            any = true;
         }
         any
     }
@@ -844,5 +839,149 @@ mod tests {
     #[test]
     fn extract_host_returns_none_for_non_http() {
         assert_eq!(extract_host("ftp://example.com/file"), None);
+    }
+
+    // ── in_flight_count / has_in_flight ─────────────────────────────────────
+
+    #[test]
+    fn in_flight_count_starts_at_zero() {
+        let cache = ImageCache::new();
+        assert_eq!(cache.in_flight_count(), 0);
+        assert!(!cache.has_in_flight());
+    }
+
+    #[test]
+    fn start_fetch_marks_url_in_flight() {
+        let mut cache = ImageCache::new();
+        // Use a URL that will fail (doesn't matter — we just check in_flight state)
+        cache.in_flight.insert("http://example.com/test.png".to_string());
+        assert_eq!(cache.in_flight_count(), 1);
+        assert!(cache.has_in_flight());
+        assert!(cache.has_attempted("http://example.com/test.png"));
+    }
+
+    #[test]
+    fn start_fetch_is_idempotent() {
+        let mut cache = ImageCache::new();
+        // Simulate already in-flight
+        cache.in_flight.insert("http://example.com/a.png".to_string());
+        let count_before = cache.in_flight_count();
+        // start_fetch should not add duplicate
+        cache.start_fetch("http://example.com/a.png");
+        assert_eq!(cache.in_flight_count(), count_before);
+    }
+
+    #[test]
+    fn start_fetch_skips_already_cached_url() {
+        let mut cache = ImageCache::new();
+        cache.insert("http://example.com/a.png", Some(DynamicImage::new_rgb8(2, 2)));
+        cache.start_fetch("http://example.com/a.png");
+        assert_eq!(cache.in_flight_count(), 0);
+    }
+
+    // ── poll_completed ──────────────────────────────────────────────────────
+
+    #[test]
+    fn poll_completed_drains_channel() {
+        let mut cache = ImageCache::new();
+        // Manually push into the channel to simulate background fetch completion
+        let img = DynamicImage::new_rgb8(4, 4);
+        cache.in_flight.insert("url1".to_string());
+        cache.in_flight.insert("url2".to_string());
+        cache.sender.send(("url1".to_string(), Some(img.clone()))).unwrap();
+        cache.sender.send(("url2".to_string(), None)).unwrap();
+
+        let any = cache.poll_completed();
+        assert!(any);
+        assert!(cache.has_image("url1"));
+        assert!(!cache.has_image("url2")); // failed fetch
+        assert!(cache.has_attempted("url2"));
+        assert_eq!(cache.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn poll_completed_returns_false_when_empty() {
+        let mut cache = ImageCache::new();
+        assert!(!cache.poll_completed());
+    }
+
+    // ── calc_display_cells ──────────────────────────────────────────────────
+
+    #[test]
+    fn calc_display_cells_zero_inputs_return_1x1() {
+        assert_eq!(calc_display_cells(0, 0, 80, 20, 2.0), (1, 1));
+        assert_eq!(calc_display_cells(100, 100, 0, 20, 2.0), (1, 1));
+        assert_eq!(calc_display_cells(100, 100, 80, 0, 2.0), (1, 1));
+    }
+
+    #[test]
+    fn calc_display_cells_fits_within_max() {
+        let (cols, rows) = calc_display_cells(800, 600, 80, 20, 2.0);
+        assert!(cols <= 80);
+        assert!(rows <= 20);
+        assert!(cols >= 1);
+        assert!(rows >= 1);
+    }
+
+    #[test]
+    fn calc_display_cells_wide_image_constrained_by_cols() {
+        // Very wide image: should be constrained by max_cols
+        let (cols, rows) = calc_display_cells(1000, 100, 40, 20, 2.0);
+        assert!(cols <= 40);
+        assert!(rows >= 1);
+    }
+
+    #[test]
+    fn calc_display_cells_tall_image_constrained_by_rows() {
+        // Very tall image: should be constrained by max_rows
+        let (cols, rows) = calc_display_cells(100, 1000, 80, 10, 2.0);
+        assert!(rows <= 10);
+        assert!(cols >= 1);
+    }
+
+    // ── blend_alpha ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn blend_alpha_fully_opaque() {
+        let pixel = image::Rgba([100, 150, 200, 255]);
+        let result = blend_alpha(pixel, (0, 0, 0));
+        assert_eq!(result, (100, 150, 200));
+    }
+
+    #[test]
+    fn blend_alpha_fully_transparent() {
+        let pixel = image::Rgba([100, 150, 200, 0]);
+        let result = blend_alpha(pixel, (50, 60, 70));
+        assert_eq!(result, (50, 60, 70));
+    }
+
+    #[test]
+    fn blend_alpha_half_transparent() {
+        let pixel = image::Rgba([200, 100, 0, 128]); // ~50% alpha
+        let (r, g, b) = blend_alpha(pixel, (0, 0, 0));
+        // With ~50% alpha over black: ~100, ~50, ~0
+        assert!(r > 90 && r < 110);
+        assert!(g > 40 && g < 60);
+        assert!(b < 5);
+    }
+
+    // ── downscale ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn downscale_small_image_unchanged() {
+        let img = DynamicImage::new_rgb8(100, 100);
+        let result = downscale(img, 2000);
+        assert_eq!(result.dimensions(), (100, 100));
+    }
+
+    #[test]
+    fn downscale_large_image_reduced() {
+        let img = DynamicImage::new_rgb8(4000, 3000);
+        let result = downscale(img, 2000);
+        let (w, h) = result.dimensions();
+        assert!(w <= 2000);
+        assert!(h <= 2000);
+        assert!(w >= 1);
+        assert!(h >= 1);
     }
 }

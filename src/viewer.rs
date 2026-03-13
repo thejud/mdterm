@@ -1356,8 +1356,8 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
             }
 
             // Render placeholder for unloaded images
-            if !drew_inline_image {
-                if let LineMeta::Image {
+            if !drew_inline_image
+                && let LineMeta::Image {
                     ref url,
                     ref alt,
                     row: image_row,
@@ -1398,7 +1398,6 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
                     }
                     drew_inline_image = true;
                 }
-            }
 
             if !drew_inline_image {
                 let highlights = if !state.slide_mode {

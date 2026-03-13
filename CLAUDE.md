@@ -15,7 +15,7 @@ cargo run -- <file.md>   # run with a markdown file
 cargo check              # type-check without building
 cargo clippy             # lint
 cargo fmt                # format code
-cargo test               # run tests (none exist yet)
+cargo test               # run tests
 ```
 
 ## Architecture
@@ -29,7 +29,7 @@ Nine source files in `src/`:
 - **theme.rs** — Two complete themes (dark/light) with 40+ color fields including overlay, math, image, and line number colors.
 - **config.rs** — Loads `~/.config/mdterm/config.toml` for persistent settings (theme, line_numbers, width).
 - **export.rs** — HTML export with inline CSS matching the current theme.
-- **image.rs** — Terminal image rendering with three protocols: Kitty (ID-based upload/placement), iTerm2 (inline image sequences), and Unicode half-block fallback. Handles lazy fetching, downscaling, caching, and terminal cell metric detection.
+- **image.rs** — Terminal image rendering with three protocols: Kitty (ID-based upload/placement), iTerm2 (inline image sequences), and Unicode half-block fallback. Fetches images on background threads via `std::sync::mpsc` (non-blocking — `start_fetch()` spawns a thread per URL, `poll_completed()` drains results each event-loop tick). Also handles downscaling, caching, and terminal cell metric detection.
 - **diagram.rs** — Mermaid flowchart parser and ASCII art renderer. Supports node shapes (rect, rounded, diamond, circle), edge labels, topological layering, and barycenter layout optimization.
 
 **Data flow:** markdown text → `pulldown-cmark` events → `Renderer` (markdown.rs) → `(Vec<Line>, DocumentInfo)` → `wrap_lines` (style.rs) → terminal/HTML output
@@ -47,6 +47,7 @@ Nine source files in `src/`:
 - **image 0.25** — Image loading and processing (PNG, JPEG, GIF, WebP, BMP, ICO, TIFF)
 - **libc 0.2** — Unix FFI for terminal cell pixel metrics (ioctl TIOCGWINSZ)
 - **base64 0.22** — Base64 encoding for image protocol escape sequences
+- **ureq 3** — Pure-Rust HTTP client for fetching remote images (replaces shelling out to `curl`)
 
 ## Rust Edition
 
