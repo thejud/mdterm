@@ -1697,8 +1697,40 @@ mod tests {
     #[test]
     fn render_math_fractions() {
         let result = render_math("\\frac{a}{b}");
-        // Should produce a/b or similar
-        assert!(result.contains('a'));
-        assert!(result.contains('b'));
+        assert_eq!(result, "a/b");
+    }
+
+    // ── Line numbers ────────────────────────────────────────────────────────
+
+    #[test]
+    fn line_numbers_enabled_adds_numbers_in_code_blocks() {
+        let theme = Theme::dark();
+        let input = "```\nfirst\nsecond\nthird\n```";
+        let (lines_with, _) = render(input, 80, &theme, true);
+        let (lines_without, _) = render(input, 80, &theme, false);
+        // With line numbers, code block lines should contain "1", "2", "3"
+        let code_text: String = lines_with
+            .iter()
+            .filter(|l| matches!(l.meta, LineMeta::CodeContent { .. }))
+            .flat_map(|l| l.spans.iter().map(|s| s.text.as_str()))
+            .collect();
+        assert!(code_text.contains("1"), "expected line number 1");
+        assert!(code_text.contains("2"), "expected line number 2");
+        assert!(code_text.contains("3"), "expected line number 3");
+        // With line numbers enabled, code lines should have more spans (the number prefix)
+        let spans_with: usize = lines_with
+            .iter()
+            .filter(|l| matches!(l.meta, LineMeta::CodeContent { .. }))
+            .map(|l| l.spans.len())
+            .sum();
+        let spans_without: usize = lines_without
+            .iter()
+            .filter(|l| matches!(l.meta, LineMeta::CodeContent { .. }))
+            .map(|l| l.spans.len())
+            .sum();
+        assert!(
+            spans_with > spans_without,
+            "line numbers should add extra spans"
+        );
     }
 }

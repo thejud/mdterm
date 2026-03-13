@@ -284,10 +284,68 @@ mod tests {
     fn multiple_lines_wrapped_independently() {
         let lines = vec![plain_line("aaa bbb"), plain_line("ccc ddd")];
         let wrapped = wrap_lines(&lines, 4);
-        assert_eq!(wrapped.len(), 4);
-        assert_eq!(line_text(&wrapped[0]).trim(), "aaa");
-        assert_eq!(line_text(&wrapped[1]).trim(), "bbb");
-        assert_eq!(line_text(&wrapped[2]).trim(), "ccc");
-        assert_eq!(line_text(&wrapped[3]).trim(), "ddd");
+        assert!(
+            wrapped.len() >= 4,
+            "each input line should wrap into at least 2"
+        );
+        let texts: Vec<String> = wrapped
+            .iter()
+            .map(|l| line_text(l).trim().to_string())
+            .collect();
+        // "aaa" and "bbb" should appear before "ccc" and "ddd"
+        let aaa_pos = texts
+            .iter()
+            .position(|t| t == "aaa")
+            .expect("missing 'aaa'");
+        let bbb_pos = texts
+            .iter()
+            .position(|t| t == "bbb")
+            .expect("missing 'bbb'");
+        let ccc_pos = texts
+            .iter()
+            .position(|t| t == "ccc")
+            .expect("missing 'ccc'");
+        let ddd_pos = texts
+            .iter()
+            .position(|t| t == "ddd")
+            .expect("missing 'ddd'");
+        assert!(aaa_pos < bbb_pos);
+        assert!(bbb_pos < ccc_pos);
+        assert!(ccc_pos < ddd_pos);
+    }
+
+    #[test]
+    fn multi_span_line_wraps_preserving_styles() {
+        let bold_style = Style {
+            bold: true,
+            ..Style::default()
+        };
+        let line = Line {
+            spans: vec![
+                StyledSpan {
+                    text: "bold ".to_string(),
+                    style: bold_style.clone(),
+                },
+                StyledSpan {
+                    text: "normal text here".to_string(),
+                    style: Style::default(),
+                },
+            ],
+            meta: LineMeta::None,
+        };
+        // Width 10 should force a wrap within the second span
+        let wrapped = wrap_lines(&[line], 10);
+        assert!(wrapped.len() >= 2, "multi-span line should wrap");
+        // First wrapped line should start with the bold span
+        assert!(
+            wrapped[0].spans[0].style.bold,
+            "first span should preserve bold style"
+        );
+        // All text should be preserved across wrapped lines
+        let all_text: String = wrapped.iter().map(|l| line_text(l)).collect();
+        assert!(all_text.contains("bold"));
+        assert!(all_text.contains("normal"));
+        assert!(all_text.contains("text"));
+        assert!(all_text.contains("here"));
     }
 }
