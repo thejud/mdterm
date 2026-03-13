@@ -78,6 +78,13 @@ pub fn run(opts: ViewerOptions) -> io::Result<()> {
             let mut coalesced = false;
             while !quit && event::poll(Duration::ZERO)? {
                 let ev = event::read()?;
+                if let Event::Mouse(me) = &ev
+                    && !matches!(
+                        me.kind,
+                        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                    ) {
+                        continue;
+                    }
                 quit = handle_event(&mut state, ev);
                 coalesced = true;
             }
