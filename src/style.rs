@@ -263,7 +263,10 @@ mod tests {
         };
         let wrapped = wrap_lines(&[line], 10);
         assert!(wrapped.len() >= 2);
-        assert!(matches!(wrapped[0].meta, LineMeta::Heading { level: 2, .. }));
+        assert!(matches!(
+            wrapped[0].meta,
+            LineMeta::Heading { level: 2, .. }
+        ));
         for l in &wrapped[1..] {
             assert!(matches!(l.meta, LineMeta::None));
         }

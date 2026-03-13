@@ -1626,7 +1626,13 @@ mod tests {
             "expected IMAGE_ROWS placeholder lines"
         );
         // Check URL and alt are propagated
-        let LineMeta::Image { url, alt, row, total_rows } = &image_lines[0].meta else {
+        let LineMeta::Image {
+            url,
+            alt,
+            row,
+            total_rows,
+        } = &image_lines[0].meta
+        else {
             panic!("expected LineMeta::Image");
         };
         assert_eq!(url, "http://example.com/img.png");
