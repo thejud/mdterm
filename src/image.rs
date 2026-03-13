@@ -704,7 +704,12 @@ fn fetch_image_http(url: &str) -> Option<DynamicImage> {
         .build()
         .into();
     let mut resp = agent.get(url).call().ok()?;
-    let buf = resp.body_mut().read_to_vec().ok()?;
+    let buf = resp
+        .body_mut()
+        .with_config()
+        .limit(10_485_760)
+        .read_to_vec()
+        .ok()?;
     image::load_from_memory(&buf).ok()
 }
 

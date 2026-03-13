@@ -374,7 +374,7 @@ impl ViewerState {
         }
 
         // Queue any not-yet-fetched images; actual fetching happens in the
-        // event loop (one per iteration) so the first frame renders immediately.
+        // event loop so the first frame renders immediately.
         {
             self.pending_image_urls.clear();
             let mut seen = std::collections::HashSet::new();
