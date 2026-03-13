@@ -54,6 +54,8 @@ pub fn run(opts: ViewerOptions) -> io::Result<()> {
         // Poll for completed background fetches
         if state.image_cache.poll_completed() {
             state.rebuild();
+            // New images arrived — loop back to render_frame immediately
+            continue;
         }
 
         // Dispatch all pending URLs as background fetches (non-blocking)
