@@ -163,6 +163,7 @@ enum ViewMode {
     Toc,
     LinkPicker,
     FuzzyHeading,
+    Help,
 }
 
 // ── Viewer state ────────────────────────────────────────────────────────────
@@ -530,12 +531,28 @@ fn handle_event(state: &mut ViewerState, ev: Event) -> bool {
             if ke.code == KeyCode::Char('c') && ke.modifiers.contains(KeyModifiers::CONTROL) {
                 return true;
             }
+            // F1 opens help from any mode; Esc/F1 closes it
+            if ke.code == KeyCode::F(1) {
+                state.mode = if state.mode == ViewMode::Help {
+                    ViewMode::Normal
+                } else {
+                    ViewMode::Help
+                };
+                return false;
+            }
+            if state.mode == ViewMode::Help {
+                if ke.code == KeyCode::Esc || ke.code == KeyCode::Char('q') {
+                    state.mode = ViewMode::Normal;
+                }
+                return false;
+            }
             match state.mode {
                 ViewMode::Normal => return handle_normal(state, ke.code, ke.modifiers),
                 ViewMode::Search => handle_search(state, ke.code),
                 ViewMode::Toc => handle_toc(state, ke.code),
                 ViewMode::LinkPicker => handle_link_picker(state, ke.code),
                 ViewMode::FuzzyHeading => handle_fuzzy(state, ke.code, ke.modifiers),
+                ViewMode::Help => {}
             }
         }
         Event::Mouse(me) => match me.kind {
@@ -1484,6 +1501,7 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
         ViewMode::Toc => render_toc_overlay(stdout, state)?,
         ViewMode::LinkPicker => render_link_picker_overlay(stdout, state)?,
         ViewMode::FuzzyHeading => render_fuzzy_overlay(stdout, state)?,
+        ViewMode::Help => render_help_overlay(stdout, state)?,
         _ => {}
     }
 
@@ -1618,7 +1636,7 @@ fn render_status_bar(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result
     let pos_label = format!(" {} ", position);
     let pos_len = pos_label.chars().count();
 
-    let hint = " / search · o toc · f links · t theme ";
+    let hint = " / search · o toc · f links · t theme · F1 help ";
     let hint_len = hint.chars().count();
     let needed = 4 + hint_len + pos_len;
     let (show_hint, fill) = if width > needed {
@@ -2108,6 +2126,200 @@ fn render_fuzzy_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Res
     }
     queue!(
         stdout,
+        SetForegroundColor(theme.overlay_border),
+        Print(format!("{}╯", "─".repeat(bot_dashes))),
+        SetAttribute(Attribute::Reset),
+    )?;
+
+    Ok(())
+}
+
+// ── Help overlay ────────────────────────────────────────────────────────────
+
+fn render_help_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result<()> {
+    let theme = &state.theme;
+    let width = state.cols as usize;
+    let viewport = state.viewport();
+
+    // Two-column table: (key, description)
+    let sections: &[(&str, &[(&str, &str)])] = &[
+        (
+            "Navigation",
+            &[
+                ("j / ↓", "Scroll down one line"),
+                ("k / ↑", "Scroll up one line"),
+                ("d / Ctrl+d", "Scroll down half page"),
+                ("u / Ctrl+u", "Scroll up half page"),
+                ("Space / PgDn", "Scroll down full page"),
+                ("b / PgUp", "Scroll up full page"),
+                ("g / Home", "Go to top"),
+                ("G / End", "Go to bottom"),
+                ("[ ", "Jump to previous heading"),
+                ("] ", "Jump to next heading"),
+                ("Tab", "Next file"),
+                ("Shift+Tab", "Previous file"),
+            ],
+        ),
+        (
+            "Modes",
+            &[
+                ("/", "Search (regex auto-detected)"),
+                ("n", "Next search match"),
+                ("N", "Previous search match"),
+                ("o", "Table of contents"),
+                ("f", "Link picker (open URLs)"),
+                (":", "Fuzzy heading jump"),
+                ("F1", "This help screen"),
+            ],
+        ),
+        (
+            "Actions",
+            &[
+                ("y", "Copy current section to clipboard"),
+                ("Y", "Copy full document to clipboard"),
+                ("c", "Copy nearest code block"),
+                ("t", "Toggle dark / light theme"),
+                ("l", "Toggle line numbers"),
+            ],
+        ),
+        (
+            "Quit",
+            &[
+                ("q", "Quit"),
+                ("Esc", "Quit / clear search"),
+                ("Ctrl+c", "Quit"),
+            ],
+        ),
+    ];
+
+    // Measure widest key and description so we can size the box
+    let key_col = sections
+        .iter()
+        .flat_map(|(_, entries)| entries.iter().map(|(k, _)| k.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let desc_col = sections
+        .iter()
+        .flat_map(|(_, entries)| entries.iter().map(|(_, d)| d.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let inner_w = key_col + desc_col + 3; // " key  desc "
+    let box_w = (inner_w + 2).max(40).min(width.saturating_sub(4));
+
+    // Count rows: section header + entries + blank between sections
+    let total_rows: usize = sections
+        .iter()
+        .map(|(_, rows)| rows.len() + 2)
+        .sum::<usize>()
+        - 1;
+    let box_h = (total_rows + 2).min(viewport.saturating_sub(2));
+    let visible_rows = box_h.saturating_sub(2);
+
+    let x_off = width.saturating_sub(box_w) / 2;
+    let y_off = viewport.saturating_sub(box_h) / 2 + 1;
+
+    // Title
+    let title = " Keyboard Shortcuts ";
+    let title_len = title.chars().count();
+    let top_dashes = box_w.saturating_sub(3 + title_len);
+
+    queue!(
+        stdout,
+        MoveTo(x_off as u16, y_off as u16),
+        SetBackgroundColor(theme.overlay_bg),
+        SetForegroundColor(theme.overlay_border),
+        Print("╭─"),
+        SetForegroundColor(theme.overlay_text),
+        Print(title),
+        SetForegroundColor(theme.overlay_border),
+        Print(format!("{}╮", "─".repeat(top_dashes))),
+    )?;
+
+    // Build the flat list of rows to render (section headers + entries)
+    let mut rows: Vec<(bool, &str, &str)> = Vec::new(); // (is_header, left, right)
+    for (i, (section, entries)) in sections.iter().enumerate() {
+        if i > 0 {
+            rows.push((false, "", "")); // blank separator
+        }
+        rows.push((true, section, ""));
+        for (key, desc) in *entries {
+            rows.push((false, key, desc));
+        }
+    }
+
+    for row_i in 0..visible_rows {
+        let screen_y = (y_off + 1 + row_i) as u16;
+        queue!(
+            stdout,
+            MoveTo(x_off as u16, screen_y),
+            SetBackgroundColor(theme.overlay_bg),
+            SetForegroundColor(theme.overlay_border),
+            Print("│"),
+        )?;
+
+        let inner = box_w.saturating_sub(2);
+        if let Some(&(is_header, left, right)) = rows.get(row_i) {
+            if is_header {
+                // Section heading
+                let label = format!(" {} ", left);
+                let label_len = label.chars().count();
+                let pad = inner.saturating_sub(label_len);
+                queue!(
+                    stdout,
+                    SetForegroundColor(theme.overlay_selected_fg),
+                    Print(&label),
+                    SetForegroundColor(theme.overlay_bg),
+                    Print(" ".repeat(pad)),
+                )?;
+            } else if left.is_empty() {
+                // Blank separator
+                queue!(
+                    stdout,
+                    SetBackgroundColor(theme.overlay_bg),
+                    Print(" ".repeat(inner)),
+                )?;
+            } else {
+                // Key + description row
+                let key_display: String = left.chars().take(key_col).collect();
+                let key_pad = key_col.saturating_sub(key_display.chars().count());
+                let desc_display: String = right.chars().take(desc_col).collect();
+                let desc_pad = inner.saturating_sub(1 + key_col + 2 + desc_display.chars().count());
+                queue!(
+                    stdout,
+                    SetForegroundColor(theme.overlay_selected_fg),
+                    Print(" "),
+                    Print(&key_display),
+                    Print(" ".repeat(key_pad)),
+                    SetForegroundColor(theme.overlay_border),
+                    Print("  "),
+                    SetForegroundColor(theme.overlay_text),
+                    Print(&desc_display),
+                    Print(" ".repeat(desc_pad)),
+                )?;
+            }
+        } else {
+            queue!(
+                stdout,
+                SetBackgroundColor(theme.overlay_bg),
+                Print(" ".repeat(inner)),
+            )?;
+        }
+
+        queue!(stdout, SetForegroundColor(theme.overlay_border), Print("│"),)?;
+    }
+
+    // Footer
+    let footer = " F1 / Esc / q  close ";
+    let footer_len = footer.chars().count();
+    let bot_dashes = box_w.saturating_sub(3 + footer_len);
+    queue!(
+        stdout,
+        MoveTo(x_off as u16, (y_off + 1 + visible_rows) as u16),
+        SetBackgroundColor(theme.overlay_bg),
+        SetForegroundColor(theme.overlay_border),
+        Print("╰─"),
+        SetForegroundColor(theme.overlay_muted),
+        Print(footer),
         SetForegroundColor(theme.overlay_border),
         Print(format!("{}╯", "─".repeat(bot_dashes))),
         SetAttribute(Attribute::Reset),
