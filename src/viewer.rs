@@ -1365,41 +1365,41 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
                     row: image_row,
                     ..
                 } = line.meta
-                    && !state.image_cache.has_image(url)
-                {
-                    if image_row == 0 {
-                        let label_text = if alt.is_empty() {
-                            url.as_str()
-                        } else {
-                            alt.as_str()
-                        };
-                        let prefix = "[ Loading: ";
-                        let suffix = " ]";
-                        let max_inner = content_width.saturating_sub(prefix.len() + suffix.len());
-                        let truncated: String = label_text.chars().take(max_inner).collect();
-                        let label = format!("{prefix}{truncated}{suffix}");
-                        let label_len = label.chars().count();
-                        let pad = content_width.saturating_sub(label_len) / 2;
-                        queue!(
-                            stdout,
-                            SetForegroundColor(theme.image_fg),
-                            SetAttribute(Attribute::Dim),
-                            Print(" ".repeat(pad)),
-                            Print(&label),
-                            Print(" ".repeat(content_width.saturating_sub(pad + label_len))),
-                            SetAttribute(Attribute::Reset),
-                            SetBackgroundColor(theme.bg),
-                        )?;
+                && !state.image_cache.has_image(url)
+            {
+                if image_row == 0 {
+                    let label_text = if alt.is_empty() {
+                        url.as_str()
                     } else {
-                        queue!(
-                            stdout,
-                            SetBackgroundColor(theme.bg),
-                            Print(" ".repeat(content_width)),
-                            SetAttribute(Attribute::Reset),
-                        )?;
-                    }
-                    drew_inline_image = true;
+                        alt.as_str()
+                    };
+                    let prefix = "[ Loading: ";
+                    let suffix = " ]";
+                    let max_inner = content_width.saturating_sub(prefix.len() + suffix.len());
+                    let truncated: String = label_text.chars().take(max_inner).collect();
+                    let label = format!("{prefix}{truncated}{suffix}");
+                    let label_len = label.chars().count();
+                    let pad = content_width.saturating_sub(label_len) / 2;
+                    queue!(
+                        stdout,
+                        SetForegroundColor(theme.image_fg),
+                        SetAttribute(Attribute::Dim),
+                        Print(" ".repeat(pad)),
+                        Print(&label),
+                        Print(" ".repeat(content_width.saturating_sub(pad + label_len))),
+                        SetAttribute(Attribute::Reset),
+                        SetBackgroundColor(theme.bg),
+                    )?;
+                } else {
+                    queue!(
+                        stdout,
+                        SetBackgroundColor(theme.bg),
+                        Print(" ".repeat(content_width)),
+                        SetAttribute(Attribute::Reset),
+                    )?;
                 }
+                drew_inline_image = true;
+            }
 
             if !drew_inline_image {
                 let highlights = if !state.slide_mode {

@@ -854,7 +854,9 @@ mod tests {
     fn start_fetch_marks_url_in_flight() {
         let mut cache = ImageCache::new();
         // Use a URL that will fail (doesn't matter — we just check in_flight state)
-        cache.in_flight.insert("http://example.com/test.png".to_string());
+        cache
+            .in_flight
+            .insert("http://example.com/test.png".to_string());
         assert_eq!(cache.in_flight_count(), 1);
         assert!(cache.has_in_flight());
         assert!(cache.has_attempted("http://example.com/test.png"));
@@ -864,7 +866,9 @@ mod tests {
     fn start_fetch_is_idempotent() {
         let mut cache = ImageCache::new();
         // Simulate already in-flight
-        cache.in_flight.insert("http://example.com/a.png".to_string());
+        cache
+            .in_flight
+            .insert("http://example.com/a.png".to_string());
         let count_before = cache.in_flight_count();
         // start_fetch should not add duplicate
         cache.start_fetch("http://example.com/a.png");
@@ -874,7 +878,10 @@ mod tests {
     #[test]
     fn start_fetch_skips_already_cached_url() {
         let mut cache = ImageCache::new();
-        cache.insert("http://example.com/a.png", Some(DynamicImage::new_rgb8(2, 2)));
+        cache.insert(
+            "http://example.com/a.png",
+            Some(DynamicImage::new_rgb8(2, 2)),
+        );
         cache.start_fetch("http://example.com/a.png");
         assert_eq!(cache.in_flight_count(), 0);
     }
@@ -888,7 +895,10 @@ mod tests {
         let img = DynamicImage::new_rgb8(4, 4);
         cache.in_flight.insert("url1".to_string());
         cache.in_flight.insert("url2".to_string());
-        cache.sender.send(("url1".to_string(), Some(img.clone()))).unwrap();
+        cache
+            .sender
+            .send(("url1".to_string(), Some(img.clone())))
+            .unwrap();
         cache.sender.send(("url2".to_string(), None)).unwrap();
 
         let any = cache.poll_completed();
