@@ -62,6 +62,16 @@ pub fn run(opts: ViewerOptions) -> io::Result<()> {
 
         if event::poll(timeout)? {
             let ev = event::read()?;
+            // Mouse move/click events that don't change state cause spurious
+            // redraws that flicker images — skip them entirely.
+            if let Event::Mouse(me) = &ev {
+                if !matches!(
+                    me.kind,
+                    MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                ) {
+                    continue;
+                }
+            }
             let mut quit = handle_event(&mut state, ev);
 
             // Coalesce pending events: drain all queued events before rendering
