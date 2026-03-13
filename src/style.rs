@@ -185,3 +185,103 @@ fn word_wrap(line: &Line, width: usize) -> Vec<Line> {
 
     lines
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: build a single-span Line with the given text.
+    fn plain_line(text: &str) -> Line {
+        Line {
+            spans: vec![StyledSpan {
+                text: text.to_string(),
+                style: Style::default(),
+            }],
+            meta: LineMeta::None,
+        }
+    }
+
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    // ── wrap_lines basic behaviour ──────────────────────────────────────────
+
+    #[test]
+    fn short_line_passes_through_unchanged() {
+        let lines = vec![plain_line("hello")];
+        let wrapped = wrap_lines(&lines, 80);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(line_text(&wrapped[0]), "hello");
+    }
+
+    #[test]
+    fn empty_line_passes_through() {
+        let lines = vec![Line::empty()];
+        let wrapped = wrap_lines(&lines, 80);
+        assert_eq!(wrapped.len(), 1);
+        assert!(wrapped[0].spans.is_empty());
+    }
+
+    #[test]
+    fn zero_width_returns_input_unchanged() {
+        let lines = vec![plain_line("hello world")];
+        let wrapped = wrap_lines(&lines, 0);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(line_text(&wrapped[0]), "hello world");
+    }
+
+    #[test]
+    fn wraps_at_word_boundary() {
+        let lines = vec![plain_line("hello world")];
+        let wrapped = wrap_lines(&lines, 6);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(line_text(&wrapped[0]).trim(), "hello");
+        assert_eq!(line_text(&wrapped[1]).trim(), "world");
+    }
+
+    #[test]
+    fn long_word_force_broken() {
+        let lines = vec![plain_line("abcdefghij")];
+        let wrapped = wrap_lines(&lines, 4);
+        assert!(wrapped.len() >= 3);
+        // Each wrapped line should be at most 4 chars
+        for line in &wrapped {
+            assert!(line.display_width() <= 4);
+        }
+        // All characters preserved
+        let all: String = wrapped.iter().map(|l| line_text(l)).collect();
+        assert_eq!(all, "abcdefghij");
+    }
+
+    #[test]
+    fn meta_propagated_to_first_wrapped_line_only() {
+        let mut line = plain_line("hello world foo bar");
+        line.meta = LineMeta::Heading {
+            level: 2,
+            text: "heading".to_string(),
+        };
+        let wrapped = wrap_lines(&[line], 10);
+        assert!(wrapped.len() >= 2);
+        assert!(matches!(wrapped[0].meta, LineMeta::Heading { level: 2, .. }));
+        for l in &wrapped[1..] {
+            assert!(matches!(l.meta, LineMeta::None));
+        }
+    }
+
+    #[test]
+    fn exact_width_line_not_wrapped() {
+        let lines = vec![plain_line("12345")];
+        let wrapped = wrap_lines(&lines, 5);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(line_text(&wrapped[0]), "12345");
+    }
+
+    #[test]
+    fn multiple_lines_wrapped_independently() {
+        let lines = vec![plain_line("aaa bbb"), plain_line("ccc ddd")];
+        let wrapped = wrap_lines(&lines, 4);
+        // Each input line should produce 2 output lines
+        assert!(wrapped.len() >= 4);
+    }
+}

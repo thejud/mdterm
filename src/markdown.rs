@@ -1522,3 +1522,173 @@ pub fn render_with(
 
     (renderer.lines, doc_info)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::style::LineMeta;
+    use crate::theme::Theme;
+
+    fn render_test(input: &str) -> (Vec<Line>, DocumentInfo) {
+        let theme = Theme::dark();
+        render(input, 80, &theme, false)
+    }
+
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    // ── Headings ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn h1_produces_heading_meta() {
+        let (lines, _) = render_test("# Hello");
+        let heading = lines
+            .iter()
+            .find(|l| matches!(&l.meta, LineMeta::Heading { level: 1, .. }));
+        assert!(heading.is_some(), "expected LineMeta::Heading level 1");
+        if let LineMeta::Heading { text, .. } = &heading.unwrap().meta {
+            assert_eq!(text, "Hello");
+        }
+    }
+
+    #[test]
+    fn h2_produces_heading_meta() {
+        let (lines, _) = render_test("## Section");
+        let heading = lines
+            .iter()
+            .find(|l| matches!(&l.meta, LineMeta::Heading { level: 2, .. }));
+        assert!(heading.is_some());
+        if let LineMeta::Heading { text, .. } = &heading.unwrap().meta {
+            assert_eq!(text, "Section");
+        }
+    }
+
+    #[test]
+    fn multiple_heading_levels() {
+        let (lines, _) = render_test("# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6");
+        let levels: Vec<u8> = lines
+            .iter()
+            .filter_map(|l| match &l.meta {
+                LineMeta::Heading { level, .. } => Some(*level),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(levels, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    // ── Code blocks ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn code_block_tracked_in_document_info() {
+        let input = "```rust\nfn main() {}\n```";
+        let (_, doc_info) = render_test(input);
+        assert_eq!(doc_info.code_blocks.len(), 1);
+        assert_eq!(doc_info.code_blocks[0].language, "rust");
+        assert!(doc_info.code_blocks[0].content.contains("fn main()"));
+    }
+
+    #[test]
+    fn code_block_lines_have_in_code_block_meta() {
+        let input = "```\nhello\nworld\n```";
+        let (lines, _) = render_test(input);
+        let code_lines: Vec<_> = lines
+            .iter()
+            .filter(|l| matches!(l.meta, LineMeta::CodeContent { .. }))
+            .collect();
+        assert!(!code_lines.is_empty(), "expected CodeContent meta lines");
+    }
+
+    #[test]
+    fn multiple_code_blocks_tracked() {
+        let input = "```python\nprint(1)\n```\n\n```js\nconsole.log(2)\n```";
+        let (_, doc_info) = render_test(input);
+        assert_eq!(doc_info.code_blocks.len(), 2);
+        assert_eq!(doc_info.code_blocks[0].language, "python");
+        assert_eq!(doc_info.code_blocks[1].language, "js");
+    }
+
+    // ── Image placeholders ──────────────────────────────────────────────────
+
+    #[test]
+    fn image_produces_placeholder_lines() {
+        let input = "![alt text](http://example.com/img.png)";
+        let (lines, _) = render_test(input);
+        let image_lines: Vec<_> = lines
+            .iter()
+            .filter(|l| matches!(&l.meta, LineMeta::Image { .. }))
+            .collect();
+        assert_eq!(
+            image_lines.len(),
+            crate::image::IMAGE_ROWS,
+            "expected IMAGE_ROWS placeholder lines"
+        );
+        // Check URL and alt are propagated
+        if let LineMeta::Image { url, alt, row, total_rows } = &image_lines[0].meta {
+            assert_eq!(url, "http://example.com/img.png");
+            assert_eq!(alt, "alt text");
+            assert_eq!(*row, 0);
+            assert_eq!(*total_rows, crate::image::IMAGE_ROWS);
+        }
+    }
+
+    #[test]
+    fn image_without_alt_gets_default() {
+        let input = "![](http://example.com/img.png)";
+        let (lines, _) = render_test(input);
+        let image_line = lines
+            .iter()
+            .find(|l| matches!(&l.meta, LineMeta::Image { .. }));
+        assert!(image_line.is_some());
+        if let LineMeta::Image { alt, .. } = &image_line.unwrap().meta {
+            assert_eq!(alt, "image");
+        }
+    }
+
+    // ── Lists ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn unordered_list_has_bullets() {
+        let input = "- item one\n- item two";
+        let (lines, _) = render_test(input);
+        let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
+        let bullet_lines: Vec<_> = texts.iter().filter(|t| t.contains('•')).collect();
+        assert_eq!(bullet_lines.len(), 2);
+    }
+
+    #[test]
+    fn ordered_list_has_numbers() {
+        let input = "1. first\n2. second";
+        let (lines, _) = render_test(input);
+        let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
+        assert!(texts.iter().any(|t| t.contains("1.")));
+        assert!(texts.iter().any(|t| t.contains("2.")));
+    }
+
+    // ── Blockquotes ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn blockquote_produces_styled_output() {
+        let input = "> quoted text";
+        let (lines, _) = render_test(input);
+        let texts: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
+        assert!(texts.iter().any(|t| t.contains("quoted text")));
+    }
+
+    // ── Inline math ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn render_math_basic_symbols() {
+        let result = render_math("\\alpha + \\beta");
+        assert!(result.contains('α'));
+        assert!(result.contains('β'));
+    }
+
+    #[test]
+    fn render_math_fractions() {
+        let result = render_math("\\frac{a}{b}");
+        // Should produce a/b or similar
+        assert!(result.contains('a'));
+        assert!(result.contains('b'));
+    }
+}
