@@ -583,7 +583,7 @@ fn handle_event(state: &mut ViewerState, ev: Event) -> bool {
     false
 }
 
-fn handle_normal(state: &mut ViewerState, code: KeyCode, mods: KeyModifiers) -> bool {
+fn handle_normal(state: &mut ViewerState, code: KeyCode, _mods: KeyModifiers) -> bool {
     let viewport = state.viewport();
     let max_offset = state.max_offset();
 
@@ -740,10 +740,10 @@ fn handle_normal(state: &mut ViewerState, code: KeyCode, mods: KeyModifiers) -> 
         KeyCode::Char(' ') | KeyCode::PageDown => {
             state.offset = (state.offset + viewport).min(max_offset);
         }
-        KeyCode::Char('d') if mods.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('d') => {
             state.offset = (state.offset + viewport / 2).min(max_offset);
         }
-        KeyCode::Char('u') if mods.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('u') => {
             state.offset = state.offset.saturating_sub(viewport / 2);
         }
         KeyCode::Char('b') | KeyCode::PageUp => {
