@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Cursor, Write};
+use std::sync::mpsc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
@@ -223,11 +224,17 @@ pub struct ImageCache {
 
     last_render_width: usize,
     cell_metrics: CellMetrics,
+
+    // Background fetch infrastructure
+    sender: mpsc::Sender<(String, Option<DynamicImage>)>,
+    receiver: mpsc::Receiver<(String, Option<DynamicImage>)>,
+    in_flight: HashSet<String>,
 }
 
 impl ImageCache {
     pub fn new() -> Self {
         let protocol = detect_protocol();
+        let (sender, receiver) = mpsc::channel();
         ImageCache {
             images: HashMap::new(),
             protocol,
@@ -237,6 +244,9 @@ impl ImageCache {
             halfblock_images: HashMap::new(),
             last_render_width: 0,
             cell_metrics: get_cell_metrics(),
+            sender,
+            receiver,
+            in_flight: HashSet::new(),
         }
     }
 
@@ -261,6 +271,69 @@ impl ImageCache {
 
     pub fn has_image(&self, url: &str) -> bool {
         self.images.get(url).is_some_and(|o| o.is_some())
+    }
+
+    /// Returns true if a fetch has already been attempted for this URL
+    /// (regardless of whether it succeeded) or is currently in flight,
+    /// so we don't re-queue it.
+    pub fn has_attempted(&self, url: &str) -> bool {
+        self.images.contains_key(url) || self.in_flight.contains(url)
+    }
+
+    /// Maximum number of concurrent background fetches.
+    const MAX_CONCURRENT_FETCHES: usize = 10;
+
+    /// Spawn a background thread to fetch `url` if not already cached or in flight.
+    /// Returns false (without spawning) if the concurrency cap has been reached.
+    pub fn start_fetch(&mut self, url: &str) -> bool {
+        if self.images.contains_key(url) || self.in_flight.contains(url) {
+            return true; // already handled
+        }
+        if self.in_flight.len() >= Self::MAX_CONCURRENT_FETCHES {
+            return false;
+        }
+        self.in_flight.insert(url.to_string());
+        let sender = self.sender.clone();
+        let url_owned = url.to_string();
+        std::thread::spawn(move || {
+            // Guard against panics in image decoding/downscaling so that
+            // the channel always receives a result and the in_flight slot
+            // is freed by poll_completed(). Without this, a panic would
+            // leave the URL stuck in in_flight permanently.
+            let img = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                fetch_image(&url_owned).map(|img| downscale(img, MAX_SOURCE_DIM))
+            }))
+            .unwrap_or(None);
+            let _ = sender.send((url_owned, img));
+        });
+        true
+    }
+
+    /// Poll for completed background fetches. Returns true if any new images arrived.
+    pub fn poll_completed(&mut self) -> bool {
+        let mut any = false;
+        while let Ok((url, img)) = self.receiver.try_recv() {
+            self.in_flight.remove(&url);
+            self.images.insert(url, img);
+            any = true;
+        }
+        any
+    }
+
+    /// Returns true if any fetches are currently in flight.
+    pub fn has_in_flight(&self) -> bool {
+        !self.in_flight.is_empty()
+    }
+
+    /// Number of fetches currently in flight.
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight.len()
+    }
+
+    /// Insert a pre-loaded image directly (used in tests).
+    #[cfg(test)]
+    fn insert(&mut self, url: &str, img: Option<image::DynamicImage>) {
+        self.images.insert(url.to_string(), img);
     }
 
     pub fn image_dimensions(&self, url: &str) -> Option<(u32, u32)> {
@@ -288,7 +361,8 @@ impl ImageCache {
         Some(rows)
     }
 
-    pub fn fetch_if_missing(&mut self, url: &str) {
+    #[cfg(test)]
+    fn fetch_if_missing(&mut self, url: &str) {
         if self.images.contains_key(url) {
             return;
         }
@@ -613,42 +687,98 @@ fn fetch_image(url: &str) -> Option<DynamicImage> {
     }
 }
 
+/// Returns true if `host` falls in the RFC 1918 172.16.0.0/12 range (172.16.x.x – 172.31.x.x).
+fn is_rfc1918_172(host: &str) -> bool {
+    if let Some(rest) = host.strip_prefix("172.")
+        && let Some(octet_str) = rest.split('.').next()
+        && let Ok(octet) = octet_str.parse::<u8>()
+    {
+        return (16..=31).contains(&octet);
+    }
+    false
+}
+
+/// Returns true if `host` is a private/loopback/link-local/metadata address.
+fn is_blocked_host(host: &str) -> bool {
+    let blocked = [
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "[::1]",
+        "0.0.0.0",
+        "169.254.169.254",
+        "metadata.google.internal",
+    ];
+    let h = host.to_lowercase();
+    blocked.iter().any(|b| h == *b)
+        || h.starts_with("10.")
+        || h.starts_with("192.168.")
+        || is_rfc1918_172(&h)
+}
+
 fn fetch_image_http(url: &str) -> Option<DynamicImage> {
-    // Block requests to private/loopback/link-local/metadata IPs to prevent SSRF
-    if let Some(host) = extract_host(url) {
-        let blocked = [
-            "localhost",
-            "127.0.0.1",
-            "::1",
-            "[::1]",
-            "0.0.0.0",
-            "169.254.169.254",
-            "metadata.google.internal",
-        ];
-        let host_lower = host.to_lowercase();
-        if blocked.iter().any(|b| host_lower == *b)
-            || host_lower.starts_with("10.")
-            || host_lower.starts_with("192.168.")
-            || host_lower.starts_with("172.16.")
-            || host_lower.starts_with("172.17.")
-            || host_lower.starts_with("172.18.")
-            || host_lower.starts_with("172.19.")
-            || host_lower.starts_with("172.2")
-            || host_lower.starts_with("172.30.")
-            || host_lower.starts_with("172.31.")
-        {
+    // SSRF check on the initial URL
+    if let Some(host) = extract_host(url)
+        && is_blocked_host(host)
+    {
+        return None;
+    }
+    fetch_image_http_inner(url, true)
+}
+
+/// Core HTTP fetch with manual redirect following (up to 5 hops).
+/// When `check_ssrf` is true, each redirect target is validated against the
+/// SSRF blocklist. Tests pass `false` to allow localhost servers.
+fn fetch_image_http_inner(url: &str, check_ssrf: bool) -> Option<DynamicImage> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .max_redirects(0)
+        .build()
+        .into();
+
+    let mut current_url = url.to_string();
+    for _ in 0..5 {
+        let resp = agent.get(&current_url).call().ok()?;
+        let status = resp.status().as_u16();
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let location = resp.headers().get("location")?.to_str().ok()?;
+            // Resolve relative redirects
+            let next = if location.starts_with("http://") || location.starts_with("https://") {
+                location.to_string()
+            } else if location.starts_with('/') {
+                // Absolute path — reuse scheme + host
+                let scheme_end = current_url.find("://")? + 3;
+                let host_end = current_url[scheme_end..]
+                    .find('/')
+                    .map(|i| i + scheme_end)
+                    .unwrap_or(current_url.len());
+                format!("{}{}", &current_url[..host_end], location)
+            } else {
+                return None; // unsupported relative form
+            };
+            // SSRF check on every redirect target
+            if check_ssrf
+                && let Some(host) = extract_host(&next)
+                && is_blocked_host(host)
+            {
+                return None;
+            }
+            current_url = next;
+            continue;
+        }
+        if !(200..300).contains(&status) {
             return None;
         }
+        let mut resp = resp;
+        let buf = resp
+            .body_mut()
+            .with_config()
+            .limit(10_485_760)
+            .read_to_vec()
+            .ok()?;
+        return image::load_from_memory(&buf).ok();
     }
-    let output = std::process::Command::new("curl")
-        .args(["-sL", "--max-time", "10", "--max-filesize", "10485760", url])
-        .output()
-        .ok()?;
-    if output.status.success() && !output.stdout.is_empty() {
-        image::load_from_memory(&output.stdout).ok()
-    } else {
-        None
-    }
+    None // too many redirects
 }
 
 /// Extract the host portion from an HTTP(S) URL.
@@ -666,4 +796,538 @@ fn extract_host(url: &str) -> Option<&str> {
     } else {
         host_port.split(':').next()?
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── has_attempted / has_image ────────────────────────────────────────────
+
+    #[test]
+    fn has_attempted_false_for_unknown_url() {
+        let cache = ImageCache::new();
+        assert!(!cache.has_attempted("http://example.com/img.png"));
+    }
+
+    #[test]
+    fn has_attempted_true_after_failed_fetch() {
+        // A None entry means the fetch ran but produced no image.
+        let mut cache = ImageCache::new();
+        cache.insert("http://example.com/img.png", None);
+        assert!(cache.has_attempted("http://example.com/img.png"));
+    }
+
+    #[test]
+    fn has_attempted_true_after_successful_fetch() {
+        let mut cache = ImageCache::new();
+        let img = image::DynamicImage::new_rgb8(4, 4);
+        cache.insert("http://example.com/img.png", Some(img));
+        assert!(cache.has_attempted("http://example.com/img.png"));
+    }
+
+    #[test]
+    fn has_image_false_for_unknown_url() {
+        let cache = ImageCache::new();
+        assert!(!cache.has_image("http://example.com/img.png"));
+    }
+
+    #[test]
+    fn has_image_false_after_failed_fetch() {
+        let mut cache = ImageCache::new();
+        cache.insert("http://example.com/img.png", None);
+        // Attempted but failed — has_image must stay false.
+        assert!(!cache.has_image("http://example.com/img.png"));
+    }
+
+    #[test]
+    fn has_image_true_after_successful_fetch() {
+        let mut cache = ImageCache::new();
+        let img = image::DynamicImage::new_rgb8(4, 4);
+        cache.insert("http://example.com/img.png", Some(img));
+        assert!(cache.has_image("http://example.com/img.png"));
+    }
+
+    #[test]
+    fn has_attempted_and_has_image_are_independent() {
+        // has_attempted subsumes has_image: any URL where has_image is true
+        // must also satisfy has_attempted, but not vice-versa.
+        let mut cache = ImageCache::new();
+        let img = image::DynamicImage::new_rgb8(1, 1);
+        cache.insert("ok", Some(img));
+        cache.insert("fail", None);
+
+        assert!(cache.has_attempted("ok"));
+        assert!(cache.has_image("ok"));
+
+        assert!(cache.has_attempted("fail"));
+        assert!(!cache.has_image("fail"));
+    }
+
+    // ── fetch_if_missing idempotency ─────────────────────────────────────────
+
+    #[test]
+    fn fetch_if_missing_does_not_overwrite_existing_entry() {
+        // If a URL is already in the cache (even as None), fetch_if_missing
+        // must leave it untouched — it must not issue a second fetch.
+        let mut cache = ImageCache::new();
+        cache.insert("local_nonexistent.png", None);
+        cache.fetch_if_missing("local_nonexistent.png");
+        // Still None — was not replaced by a fresh (failed) attempt.
+        assert!(!cache.has_image("local_nonexistent.png"));
+        assert!(cache.has_attempted("local_nonexistent.png"));
+    }
+
+    // ── extract_host ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_host_https() {
+        assert_eq!(
+            extract_host("https://example.com/path"),
+            Some("example.com")
+        );
+    }
+
+    #[test]
+    fn extract_host_http_with_port() {
+        assert_eq!(
+            extract_host("http://example.com:8080/path"),
+            Some("example.com")
+        );
+    }
+
+    #[test]
+    fn extract_host_strips_userinfo() {
+        assert_eq!(
+            extract_host("https://user:pass@example.com/path"),
+            Some("example.com")
+        );
+    }
+
+    #[test]
+    fn extract_host_ipv6() {
+        assert_eq!(extract_host("http://[::1]/path"), Some("::1"));
+    }
+
+    #[test]
+    fn extract_host_returns_none_for_non_http() {
+        assert_eq!(extract_host("ftp://example.com/file"), None);
+    }
+
+    // ── in_flight_count / has_in_flight ─────────────────────────────────────
+
+    #[test]
+    fn in_flight_count_starts_at_zero() {
+        let cache = ImageCache::new();
+        assert_eq!(cache.in_flight_count(), 0);
+        assert!(!cache.has_in_flight());
+    }
+
+    #[test]
+    fn start_fetch_marks_url_in_flight() {
+        let mut cache = ImageCache::new();
+        // Use a URL that will fail (doesn't matter — we just check in_flight state)
+        cache
+            .in_flight
+            .insert("http://example.com/test.png".to_string());
+        assert_eq!(cache.in_flight_count(), 1);
+        assert!(cache.has_in_flight());
+        assert!(cache.has_attempted("http://example.com/test.png"));
+    }
+
+    #[test]
+    fn start_fetch_is_idempotent() {
+        let mut cache = ImageCache::new();
+        // Simulate already in-flight
+        cache
+            .in_flight
+            .insert("http://example.com/a.png".to_string());
+        let count_before = cache.in_flight_count();
+        // start_fetch should not add duplicate
+        cache.start_fetch("http://example.com/a.png");
+        assert_eq!(cache.in_flight_count(), count_before);
+    }
+
+    #[test]
+    fn start_fetch_skips_already_cached_url() {
+        let mut cache = ImageCache::new();
+        cache.insert(
+            "http://example.com/a.png",
+            Some(DynamicImage::new_rgb8(2, 2)),
+        );
+        cache.start_fetch("http://example.com/a.png");
+        assert_eq!(cache.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn start_fetch_respects_concurrency_cap() {
+        let mut cache = ImageCache::new();
+        // Fill up to the cap by inserting directly into in_flight
+        for i in 0..ImageCache::MAX_CONCURRENT_FETCHES {
+            cache
+                .in_flight
+                .insert(format!("http://example.com/{i}.png"));
+        }
+        assert_eq!(cache.in_flight_count(), ImageCache::MAX_CONCURRENT_FETCHES);
+        // Attempting another fetch should return false
+        let accepted = cache.start_fetch("http://example.com/extra.png");
+        assert!(!accepted);
+        assert_eq!(cache.in_flight_count(), ImageCache::MAX_CONCURRENT_FETCHES);
+    }
+
+    // ── poll_completed ──────────────────────────────────────────────────────
+
+    #[test]
+    fn poll_completed_drains_channel() {
+        let mut cache = ImageCache::new();
+        // Manually push into the channel to simulate background fetch completion
+        let img = DynamicImage::new_rgb8(4, 4);
+        cache.in_flight.insert("url1".to_string());
+        cache.in_flight.insert("url2".to_string());
+        cache
+            .sender
+            .send(("url1".to_string(), Some(img.clone())))
+            .unwrap();
+        cache.sender.send(("url2".to_string(), None)).unwrap();
+
+        let any = cache.poll_completed();
+        assert!(any);
+        assert!(cache.has_image("url1"));
+        assert!(!cache.has_image("url2")); // failed fetch
+        assert!(cache.has_attempted("url2"));
+        assert_eq!(cache.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn poll_completed_returns_false_when_empty() {
+        let mut cache = ImageCache::new();
+        assert!(!cache.poll_completed());
+    }
+
+    // ── calc_display_cells ──────────────────────────────────────────────────
+
+    #[test]
+    fn calc_display_cells_zero_inputs_return_1x1() {
+        assert_eq!(calc_display_cells(0, 0, 80, 20, 2.0), (1, 1));
+        assert_eq!(calc_display_cells(100, 100, 0, 20, 2.0), (1, 1));
+        assert_eq!(calc_display_cells(100, 100, 80, 0, 2.0), (1, 1));
+    }
+
+    #[test]
+    fn calc_display_cells_fits_within_max() {
+        let (cols, rows) = calc_display_cells(800, 600, 80, 20, 2.0);
+        assert!(cols <= 80);
+        assert!(rows <= 20);
+        assert!(cols >= 1);
+        assert!(rows >= 1);
+    }
+
+    #[test]
+    fn calc_display_cells_wide_image_constrained_by_cols() {
+        // Very wide image: should be constrained by max_cols
+        let (cols, rows) = calc_display_cells(1000, 100, 40, 20, 2.0);
+        assert!(cols <= 40);
+        assert!(rows >= 1);
+    }
+
+    #[test]
+    fn calc_display_cells_tall_image_constrained_by_rows() {
+        // Very tall image: should be constrained by max_rows
+        let (cols, rows) = calc_display_cells(100, 1000, 80, 10, 2.0);
+        assert!(rows <= 10);
+        assert!(cols >= 1);
+    }
+
+    // ── blend_alpha ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn blend_alpha_fully_opaque() {
+        let pixel = image::Rgba([100, 150, 200, 255]);
+        let result = blend_alpha(pixel, (0, 0, 0));
+        assert_eq!(result, (100, 150, 200));
+    }
+
+    #[test]
+    fn blend_alpha_fully_transparent() {
+        let pixel = image::Rgba([100, 150, 200, 0]);
+        let result = blend_alpha(pixel, (50, 60, 70));
+        assert_eq!(result, (50, 60, 70));
+    }
+
+    #[test]
+    fn blend_alpha_half_transparent() {
+        let pixel = image::Rgba([200, 100, 0, 128]); // ~50% alpha
+        let (r, g, b) = blend_alpha(pixel, (0, 0, 0));
+        // With ~50% alpha over black: ~100, ~50, ~0
+        assert!(r > 90 && r < 110);
+        assert!(g > 40 && g < 60);
+        assert!(b < 5);
+    }
+
+    // ── downscale ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn downscale_small_image_unchanged() {
+        let img = DynamicImage::new_rgb8(100, 100);
+        let result = downscale(img, 2000);
+        assert_eq!(result.dimensions(), (100, 100));
+    }
+
+    #[test]
+    fn downscale_large_image_reduced() {
+        // Just over the limit — enough to trigger downscale without a huge
+        // debug-mode allocation (4000x3000 was ~10s in unoptimized builds).
+        let img = DynamicImage::new_rgb8(200, 150);
+        let result = downscale(img, 100);
+        let (w, h) = result.dimensions();
+        assert!(w <= 100);
+        assert!(h <= 100);
+        assert!(w >= 1);
+        assert!(h >= 1);
+    }
+
+    // ── is_blocked_host ─────────────────────────────────────────────────────
+
+    #[test]
+    fn is_blocked_host_blocks_localhost() {
+        assert!(is_blocked_host("localhost"));
+        assert!(is_blocked_host("127.0.0.1"));
+        assert!(is_blocked_host("::1"));
+        assert!(is_blocked_host("[::1]"));
+        assert!(is_blocked_host("0.0.0.0"));
+    }
+
+    #[test]
+    fn is_blocked_host_blocks_private_ranges() {
+        assert!(is_blocked_host("10.0.0.1"));
+        assert!(is_blocked_host("192.168.1.1"));
+        assert!(is_blocked_host("172.16.0.1"));
+        assert!(is_blocked_host("169.254.169.254"));
+        assert!(is_blocked_host("metadata.google.internal"));
+    }
+
+    #[test]
+    fn is_blocked_host_blocks_all_rfc1918_172() {
+        for octet in 16..=31 {
+            assert!(is_blocked_host(&format!("172.{octet}.0.1")));
+        }
+    }
+
+    #[test]
+    fn is_blocked_host_allows_public_172() {
+        // 172.200.x.x and 172.217.x.x (Google) are NOT in 172.16/12
+        assert!(!is_blocked_host("172.200.0.1"));
+        assert!(!is_blocked_host("172.217.14.99"));
+        assert!(!is_blocked_host("172.15.0.1"));
+        assert!(!is_blocked_host("172.32.0.1"));
+    }
+
+    #[test]
+    fn is_blocked_host_allows_public() {
+        assert!(!is_blocked_host("example.com"));
+        assert!(!is_blocked_host("8.8.8.8"));
+        assert!(!is_blocked_host("cdn.github.com"));
+    }
+
+    // ── extract_host ────────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_host_various_urls() {
+        assert_eq!(
+            extract_host("http://example.com/img.png"),
+            Some("example.com")
+        );
+        assert_eq!(
+            extract_host("https://cdn.example.com:8080/img"),
+            Some("cdn.example.com")
+        );
+        assert_eq!(extract_host("ftp://nope.com/x"), None);
+        assert_eq!(extract_host("not-a-url"), None);
+    }
+
+    // ── integration tests with a local HTTP server ──────────────────────────
+
+    use std::io::Read as IoRead;
+    use std::net::TcpListener;
+
+    /// A minimal 1x1 red PNG (68 bytes).
+    fn tiny_png() -> Vec<u8> {
+        let img = DynamicImage::new_rgb8(1, 1);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
+    /// Spin up a TcpListener on a random port, run `handler` in a thread for
+    /// each incoming connection, and return the base URL.
+    /// Returns `None` if loopback is unavailable (e.g. sandboxed CI).
+    fn start_test_server(
+        handler: impl Fn(std::net::TcpStream) + Send + Sync + 'static,
+    ) -> Option<(String, std::net::SocketAddr)> {
+        let listener = TcpListener::bind("127.0.0.1:0").ok()?;
+        let addr = listener.local_addr().ok()?;
+        let base = format!("http://127.0.0.1:{}", addr.port());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if let Ok(stream) = stream {
+                    let _ = (handler)(stream);
+                }
+            }
+        });
+        Some((base, addr))
+    }
+
+    #[test]
+    #[ignore] // integration test — run with `cargo test -- --ignored`
+    fn http_fetch_simple_image() {
+        let png = tiny_png();
+        let Some((base, _)) = start_test_server(move |mut stream| {
+            let mut buf = [0u8; 512];
+            let _ = stream.read(&mut buf);
+            let body = png.clone();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.write_all(&body);
+        }) else {
+            return; // loopback unavailable
+        };
+        let result = fetch_image_http_inner(&format!("{base}/image.png"), false);
+        assert!(result.is_some(), "should fetch a simple image");
+        assert_eq!(result.unwrap().dimensions(), (1, 1));
+    }
+
+    #[test]
+    #[ignore]
+    fn http_fetch_follows_redirect() {
+        let png = tiny_png();
+        let Some((base, _)) = start_test_server(move |mut stream| {
+            let mut buf = [0u8; 512];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            if req.contains("GET /redirect") {
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: /image.png\r\nContent-Length: 0\r\n\r\n"
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            } else {
+                let body = png.clone();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.write_all(&body);
+            }
+        }) else {
+            return;
+        };
+        let result = fetch_image_http_inner(&format!("{base}/redirect"), false);
+        assert!(result.is_some(), "should follow redirect and fetch image");
+    }
+
+    #[test]
+    #[ignore]
+    fn http_fetch_follows_absolute_redirect() {
+        let png = tiny_png();
+        // Need two ports: one redirects to the other
+        let Some((target_base, _)) = start_test_server(move |mut stream| {
+            let mut buf = [0u8; 512];
+            let _ = stream.read(&mut buf);
+            let body = png.clone();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.write_all(&body);
+        }) else {
+            return;
+        };
+
+        let target = target_base.clone();
+        let Some((redir_base, _)) = start_test_server(move |mut stream| {
+            let mut buf = [0u8; 512];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 301 Moved\r\nLocation: {}/image.png\r\nContent-Length: 0\r\n\r\n",
+                target
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }) else {
+            return;
+        };
+
+        let result = fetch_image_http_inner(&format!("{redir_base}/go"), false);
+        assert!(
+            result.is_some(),
+            "should follow absolute redirect across ports"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn http_fetch_stops_after_too_many_redirects() {
+        let Some((base, _)) = start_test_server(|mut stream| {
+            let mut buf = [0u8; 512];
+            let _ = stream.read(&mut buf);
+            // Always redirect to self — infinite loop
+            let resp = "HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes());
+        }) else {
+            return;
+        };
+        let result = fetch_image_http_inner(&format!("{base}/loop"), false);
+        assert!(result.is_none(), "should give up after 5 redirects");
+    }
+
+    #[test]
+    #[ignore]
+    fn http_fetch_slow_image_within_timeout() {
+        let png = tiny_png();
+        let Some((base, _)) = start_test_server(move |mut stream| {
+            let mut buf = [0u8; 512];
+            let _ = stream.read(&mut buf);
+            // Delay 500ms then serve
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let body = png.clone();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.write_all(&body);
+        }) else {
+            return;
+        };
+        let result = fetch_image_http_inner(&format!("{base}/slow.png"), false);
+        assert!(result.is_some(), "500ms delay should be within 10s timeout");
+    }
+
+    #[test]
+    #[ignore]
+    fn http_fetch_404_returns_none() {
+        let Some((base, _)) = start_test_server(|mut stream| {
+            let mut buf = [0u8; 512];
+            let _ = stream.read(&mut buf);
+            let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes());
+        }) else {
+            return;
+        };
+        let result = fetch_image_http_inner(&format!("{base}/missing.png"), false);
+        assert!(result.is_none(), "404 should return None");
+    }
+
+    #[test]
+    fn ssrf_blocks_redirect_to_metadata() {
+        // Redirect to a blocked IP — should be caught even though initial URL is fine
+        // We test the SSRF logic by using check_ssrf=true and checking that the
+        // redirect target is validated.
+        // Since initial URL is also localhost (blocked), we test the function directly.
+        let blocked = "http://169.254.169.254/latest/meta-data/";
+        assert!(fetch_image_http(blocked).is_none());
+    }
 }

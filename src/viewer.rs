@@ -51,8 +51,31 @@ pub fn run(opts: ViewerOptions) -> io::Result<()> {
         // Clear transient status after rendering so it shows for one frame
         state.status_msg = None;
 
-        let timeout = if state.fast_scrolling {
-            // Short timeout so images re-appear quickly after scroll stops
+        // Poll for completed background fetches
+        let new_images = state.image_cache.poll_completed();
+        if new_images {
+            state.rebuild();
+        }
+
+        // Dispatch pending URLs as background fetches (concurrency cap is in ImageCache)
+        while let Some(url) = state.pending_image_urls.pop_front() {
+            if !state.image_cache.start_fetch(&url) {
+                // Cap reached — put the URL back and stop dispatching
+                state.pending_image_urls.push_front(url);
+                break;
+            }
+        }
+
+        // If new images arrived, loop back to render them immediately.
+        // This comes after dispatch so pending URLs still get queued.
+        if new_images {
+            continue;
+        }
+
+        let timeout = if state.image_cache.has_in_flight() {
+            // Check for completions frequently while fetches are in flight
+            Duration::from_millis(50)
+        } else if state.fast_scrolling {
             Duration::from_millis(50)
         } else if state.follow_mode {
             Duration::from_millis(500)
@@ -228,6 +251,9 @@ struct ViewerState {
     // Image cache
     image_cache: crate::image::ImageCache,
 
+    // Images not yet fetched; drained one-per-frame in the event loop
+    pending_image_urls: std::collections::VecDeque<String>,
+
     // Scroll performance: skip expensive image rendering during rapid scroll
     fast_scrolling: bool,
 }
@@ -296,6 +322,7 @@ impl ViewerState {
             last_mtime,
             status_msg: None,
             image_cache: crate::image::ImageCache::new(),
+            pending_image_urls: std::collections::VecDeque::new(),
             fast_scrolling: false,
         }
     }
@@ -360,16 +387,19 @@ impl ViewerState {
             }
         }
 
-        // Fetch images, pre-render, and adjust placeholder rows
+        // Queue any not-yet-fetched images; actual fetching happens in the
+        // event loop so the first frame renders immediately.
         {
+            self.pending_image_urls.clear();
             let mut seen = std::collections::HashSet::new();
             for line in &self.wrapped {
                 if let LineMeta::Image {
                     ref url, row: 0, ..
                 } = line.meta
                     && seen.insert(url.clone())
+                    && !self.image_cache.has_attempted(url)
                 {
-                    self.image_cache.fetch_if_missing(url);
+                    self.pending_image_urls.push_back(url.clone());
                 }
             }
             self.image_cache.pre_render(cw);
@@ -387,11 +417,11 @@ impl ViewerState {
                 {
                     let url = url.clone();
                     let alt = alt.clone();
-                    // Use ideal rows if image loaded, otherwise 0 (just show caption/link)
+                    // Use ideal rows if image loaded, otherwise 3 placeholder rows
                     let actual_rows = if self.image_cache.has_image(&url) {
                         self.image_cache.ideal_rows(&url, cw).unwrap_or(total_rows)
                     } else {
-                        0
+                        3
                     };
 
                     for r in 0..actual_rows {
@@ -1410,6 +1440,50 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
                 )?;
             }
 
+            // Render placeholder for unloaded images
+            if !drew_inline_image
+                && let LineMeta::Image {
+                    ref url,
+                    ref alt,
+                    row: image_row,
+                    ..
+                } = line.meta
+                && !state.image_cache.has_image(url)
+            {
+                if image_row == 0 {
+                    let label_text = if alt.is_empty() {
+                        url.as_str()
+                    } else {
+                        alt.as_str()
+                    };
+                    let prefix = "[ Loading: ";
+                    let suffix = " ]";
+                    let max_inner = content_width.saturating_sub(prefix.len() + suffix.len());
+                    let truncated: String = label_text.chars().take(max_inner).collect();
+                    let label = format!("{prefix}{truncated}{suffix}");
+                    let label_len = label.chars().count();
+                    let pad = content_width.saturating_sub(label_len) / 2;
+                    queue!(
+                        stdout,
+                        SetForegroundColor(theme.image_fg),
+                        SetAttribute(Attribute::Dim),
+                        Print(" ".repeat(pad)),
+                        Print(&label),
+                        Print(" ".repeat(content_width.saturating_sub(pad + label_len))),
+                        SetAttribute(Attribute::Reset),
+                        SetBackgroundColor(theme.bg),
+                    )?;
+                } else {
+                    queue!(
+                        stdout,
+                        SetBackgroundColor(theme.bg),
+                        Print(" ".repeat(content_width)),
+                        SetAttribute(Attribute::Reset),
+                    )?;
+                }
+                drew_inline_image = true;
+            }
+
             if !drew_inline_image {
                 let highlights = if !state.slide_mode {
                     state.search.highlights_for_line(line_idx)
@@ -1693,13 +1767,22 @@ fn render_status_bar(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result
     let pos_label = format!(" {} ", position);
     let pos_len = pos_label.chars().count();
 
+    let pending = state.image_cache.in_flight_count();
+    let loading_label = if pending > 0 {
+        let noun = if pending == 1 { "image" } else { "images" };
+        format!(" loading {pending} {noun} ")
+    } else {
+        String::new()
+    };
+    let loading_len = loading_label.chars().count();
+
     let hint = " / search · o toc · f links · t theme · F1 help ";
     let hint_len = hint.chars().count();
-    let needed = 4 + hint_len + pos_len;
+    let needed = 4 + hint_len + loading_len + pos_len;
     let (show_hint, fill) = if width > needed {
         (true, width - needed)
     } else {
-        (false, width.saturating_sub(4 + pos_len))
+        (false, width.saturating_sub(4 + loading_len + pos_len))
     };
 
     queue!(
@@ -1716,6 +1799,19 @@ fn render_status_bar(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result
         stdout,
         SetForegroundColor(theme.border),
         Print("─".repeat(fill)),
+    )?;
+    if !loading_label.is_empty() {
+        queue!(
+            stdout,
+            SetForegroundColor(theme.image_fg),
+            SetAttribute(Attribute::Dim),
+            Print(&loading_label),
+            SetAttribute(Attribute::Reset),
+            SetBackgroundColor(theme.bg),
+        )?;
+    }
+    queue!(
+        stdout,
         SetForegroundColor(theme.position),
         Print(&pos_label),
         SetForegroundColor(theme.border),
