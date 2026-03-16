@@ -57,11 +57,11 @@ pub fn run(opts: ViewerOptions) -> io::Result<()> {
             state.rebuild();
         }
 
-        // Dispatch pending URLs as background fetches, capped at 10 concurrent
-        while state.image_cache.in_flight_count() < 10 {
-            if let Some(url) = state.pending_image_urls.pop_front() {
-                state.image_cache.start_fetch(&url);
-            } else {
+        // Dispatch pending URLs as background fetches (concurrency cap is in ImageCache)
+        while let Some(url) = state.pending_image_urls.pop_front() {
+            if !state.image_cache.start_fetch(&url) {
+                // Cap reached — put the URL back and stop dispatching
+                state.pending_image_urls.push_front(url);
                 break;
             }
         }

@@ -280,18 +280,33 @@ impl ImageCache {
         self.images.contains_key(url) || self.in_flight.contains(url)
     }
 
+    /// Maximum number of concurrent background fetches.
+    const MAX_CONCURRENT_FETCHES: usize = 10;
+
     /// Spawn a background thread to fetch `url` if not already cached or in flight.
-    pub fn start_fetch(&mut self, url: &str) {
+    /// Returns false (without spawning) if the concurrency cap has been reached.
+    pub fn start_fetch(&mut self, url: &str) -> bool {
         if self.images.contains_key(url) || self.in_flight.contains(url) {
-            return;
+            return true; // already handled
+        }
+        if self.in_flight.len() >= Self::MAX_CONCURRENT_FETCHES {
+            return false;
         }
         self.in_flight.insert(url.to_string());
         let sender = self.sender.clone();
         let url_owned = url.to_string();
         std::thread::spawn(move || {
-            let img = fetch_image(&url_owned).map(|img| downscale(img, MAX_SOURCE_DIM));
+            // Guard against panics in image decoding/downscaling so that
+            // the channel always receives a result and the in_flight slot
+            // is freed by poll_completed(). Without this, a panic would
+            // leave the URL stuck in in_flight permanently.
+            let img = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                fetch_image(&url_owned).map(|img| downscale(img, MAX_SOURCE_DIM))
+            }))
+            .unwrap_or(None);
             let _ = sender.send((url_owned, img));
         });
+        true
     }
 
     /// Poll for completed background fetches. Returns true if any new images arrived.
@@ -672,6 +687,17 @@ fn fetch_image(url: &str) -> Option<DynamicImage> {
     }
 }
 
+/// Returns true if `host` falls in the RFC 1918 172.16.0.0/12 range (172.16.x.x – 172.31.x.x).
+fn is_rfc1918_172(host: &str) -> bool {
+    if let Some(rest) = host.strip_prefix("172.")
+        && let Some(octet_str) = rest.split('.').next()
+        && let Ok(octet) = octet_str.parse::<u8>()
+    {
+        return (16..=31).contains(&octet);
+    }
+    false
+}
+
 /// Returns true if `host` is a private/loopback/link-local/metadata address.
 fn is_blocked_host(host: &str) -> bool {
     let blocked = [
@@ -687,13 +713,7 @@ fn is_blocked_host(host: &str) -> bool {
     blocked.iter().any(|b| h == *b)
         || h.starts_with("10.")
         || h.starts_with("192.168.")
-        || h.starts_with("172.16.")
-        || h.starts_with("172.17.")
-        || h.starts_with("172.18.")
-        || h.starts_with("172.19.")
-        || h.starts_with("172.2")
-        || h.starts_with("172.30.")
-        || h.starts_with("172.31.")
+        || is_rfc1918_172(&h)
 }
 
 fn fetch_image_http(url: &str) -> Option<DynamicImage> {
@@ -939,6 +959,20 @@ mod tests {
         assert_eq!(cache.in_flight_count(), 0);
     }
 
+    #[test]
+    fn start_fetch_respects_concurrency_cap() {
+        let mut cache = ImageCache::new();
+        // Fill up to the cap by inserting directly into in_flight
+        for i in 0..ImageCache::MAX_CONCURRENT_FETCHES {
+            cache.in_flight.insert(format!("http://example.com/{i}.png"));
+        }
+        assert_eq!(cache.in_flight_count(), ImageCache::MAX_CONCURRENT_FETCHES);
+        // Attempting another fetch should return false
+        let accepted = cache.start_fetch("http://example.com/extra.png");
+        assert!(!accepted);
+        assert_eq!(cache.in_flight_count(), ImageCache::MAX_CONCURRENT_FETCHES);
+    }
+
     // ── poll_completed ──────────────────────────────────────────────────────
 
     #[test]
@@ -1068,6 +1102,22 @@ mod tests {
         assert!(is_blocked_host("172.16.0.1"));
         assert!(is_blocked_host("169.254.169.254"));
         assert!(is_blocked_host("metadata.google.internal"));
+    }
+
+    #[test]
+    fn is_blocked_host_blocks_all_rfc1918_172() {
+        for octet in 16..=31 {
+            assert!(is_blocked_host(&format!("172.{octet}.0.1")));
+        }
+    }
+
+    #[test]
+    fn is_blocked_host_allows_public_172() {
+        // 172.200.x.x and 172.217.x.x (Google) are NOT in 172.16/12
+        assert!(!is_blocked_host("172.200.0.1"));
+        assert!(!is_blocked_host("172.217.14.99"));
+        assert!(!is_blocked_host("172.15.0.1"));
+        assert!(!is_blocked_host("172.32.0.1"));
     }
 
     #[test]
