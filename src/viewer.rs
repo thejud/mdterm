@@ -974,6 +974,29 @@ fn handle_toc(state: &mut ViewerState, code: KeyCode) {
     }
 }
 
+/// Convert heading text to a GitHub-style anchor slug.
+/// Note: when duplicate headings exist, callers match the first occurrence.
+fn heading_to_slug(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut prev_hyphen = false;
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            for lc in c.to_lowercase() {
+                result.push(lc);
+            }
+            prev_hyphen = false;
+        } else if (c == ' ' || c == '-') && !prev_hyphen && !result.is_empty() {
+            result.push('-');
+            prev_hyphen = true;
+        }
+    }
+    // Trim trailing hyphen
+    if result.ends_with('-') {
+        result.pop();
+    }
+    result
+}
+
 fn handle_link_picker(state: &mut ViewerState, code: KeyCode) {
     match code {
         KeyCode::Esc => {
@@ -991,7 +1014,20 @@ fn handle_link_picker(state: &mut ViewerState, code: KeyCode) {
                 && num <= state.link_entries.len()
             {
                 let url = state.link_entries[num - 1].url.clone();
-                if url.starts_with("http://")
+                if let Some(anchor) = url.strip_prefix('#') {
+                    if let Some(entry) = state
+                        .toc_entries
+                        .iter()
+                        .find(|e| heading_to_slug(&e.text) == anchor)
+                    {
+                        let target = entry.line_idx;
+                        let max = state.max_offset();
+                        state.offset = target.min(max);
+                        state.status_msg = Some(format!("Jumped to: {}", url));
+                    } else {
+                        state.status_msg = Some(format!("Heading not found: {}", url));
+                    }
+                } else if url.starts_with("http://")
                     || url.starts_with("https://")
                     || url.starts_with("mailto:")
                 {
@@ -2762,5 +2798,51 @@ mod tests {
             visible < total,
             "short viewport should truncate help: visible={visible}, total={total}"
         );
+    }
+
+    #[test]
+    fn slug_basic() {
+        assert_eq!(heading_to_slug("Hello World"), "hello-world");
+    }
+
+    #[test]
+    fn slug_punctuation_stripped() {
+        assert_eq!(heading_to_slug("Rust 2024!"), "rust-2024");
+        assert_eq!(heading_to_slug("What's new?"), "whats-new");
+    }
+
+    #[test]
+    fn slug_consecutive_hyphens_collapsed() {
+        assert_eq!(heading_to_slug("foo--bar"), "foo-bar");
+        assert_eq!(heading_to_slug("a  b"), "a-b");
+    }
+
+    #[test]
+    fn slug_unicode() {
+        assert_eq!(heading_to_slug("café"), "café");
+        assert_eq!(heading_to_slug("Über"), "über");
+    }
+
+    #[test]
+    fn slug_multi_char_lowercase() {
+        assert_eq!(heading_to_slug("straße"), "straße");
+    }
+
+    #[test]
+    fn slug_leading_trailing_trimmed() {
+        assert_eq!(heading_to_slug(" Hello "), "hello");
+        assert_eq!(heading_to_slug("- - -"), "");
+        assert_eq!(heading_to_slug("--foo--"), "foo");
+    }
+
+    #[test]
+    fn slug_mixed_unicode_punctuation() {
+        assert_eq!(heading_to_slug("Héllo, World!"), "héllo-world");
+    }
+
+    #[test]
+    fn slug_empty_and_special_only() {
+        assert_eq!(heading_to_slug(""), "");
+        assert_eq!(heading_to_slug("!@#$%"), "");
     }
 }
