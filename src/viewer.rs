@@ -418,7 +418,8 @@ impl ViewerState {
                     self.pending_image_urls.push_back(url.clone());
                 }
             }
-            self.image_cache.pre_render(cw);
+            self.image_cache
+                .pre_render(cw, crate::image::color_to_rgb(self.theme.bg));
 
             // Adjust image placeholder rows to match actual image aspect ratio
             let mut new_wrapped = Vec::with_capacity(self.wrapped.len());
@@ -1716,9 +1717,14 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
         }
     }
 
-    // iTerm2: overlay images in a second pass (1 escape sequence per image,
+    // iTerm2/Sixel: overlay images in a second pass (1 escape sequence per image,
     // not per-row, so scrolling stays smooth).
-    if !suppress_images && state.image_cache.protocol() == crate::image::ImageProtocol::Iterm2 {
+    if !suppress_images
+        && matches!(
+            state.image_cache.protocol(),
+            crate::image::ImageProtocol::Iterm2 | crate::image::ImageProtocol::Sixel
+        )
+    {
         let mut row = 0;
         while row < viewport {
             let line_idx = if state.slide_mode {
@@ -1768,7 +1774,7 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
                     }
                 }
                 // +1 for title bar row
-                state.image_cache.render_iterm2_block(
+                state.image_cache.render_block_image(
                     stdout,
                     &url,
                     first_image_row,
