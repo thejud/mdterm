@@ -614,6 +614,16 @@ impl ImageCache {
         self.in_flight.len()
     }
 
+    /// Cancel all in-flight fetches by replacing the channel.
+    /// Background threads will finish but their results go to the dead channel.
+    /// Already-cached images are preserved.
+    pub fn cancel_in_flight(&mut self) {
+        let (sender, receiver) = mpsc::channel();
+        self.sender = sender;
+        self.receiver = receiver;
+        self.in_flight.clear();
+    }
+
     /// Insert a pre-loaded image directly (used in tests).
     #[cfg(test)]
     fn insert(&mut self, url: &str, img: Option<image::DynamicImage>) {

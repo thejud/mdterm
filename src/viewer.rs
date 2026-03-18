@@ -425,7 +425,11 @@ impl ViewerState {
             self.image_cache
                 .pre_render(cw, crate::image::color_to_rgb(self.theme.bg));
 
-            // Adjust image placeholder rows to match actual image aspect ratio
+            // Adjust image placeholder rows to match actual image aspect ratio.
+            // Track how many rows shift above the current scroll offset so we
+            // can compensate and keep the viewport visually stable.
+            let old_offset = self.offset;
+            let mut offset_delta: isize = 0;
             let mut new_wrapped = Vec::with_capacity(self.wrapped.len());
             let mut i = 0;
             while i < self.wrapped.len() {
@@ -444,6 +448,12 @@ impl ViewerState {
                     } else {
                         3
                     };
+
+                    // If this image block is entirely above the viewport,
+                    // adjust offset to compensate for the row count change.
+                    if i + total_rows <= old_offset {
+                        offset_delta += actual_rows as isize - total_rows as isize;
+                    }
 
                     for r in 0..actual_rows {
                         new_wrapped.push(Line {
@@ -464,6 +474,7 @@ impl ViewerState {
                 }
             }
             self.wrapped = new_wrapped;
+            self.offset = (old_offset as isize + offset_delta).max(0) as usize;
         }
 
         // Build slide boundaries
@@ -513,6 +524,9 @@ impl ViewerState {
         }
         let path = self.files[idx].clone();
         if let Ok(c) = std::fs::read_to_string(&path) {
+            // Cancel in-flight image fetches from the previous file so their
+            // completions don't trigger spurious rebuilds on the new file.
+            self.image_cache.cancel_in_flight();
             self.current_file_idx = idx;
             self.filename = path.clone();
             self.content = c;
