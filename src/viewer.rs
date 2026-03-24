@@ -1786,16 +1786,27 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
     )?;
 
     // Content
+    let (slide_start, slide_end) = if state.slide_mode {
+        let start = state
+            .slide_boundaries
+            .get(state.current_slide)
+            .copied()
+            .unwrap_or(0);
+        let end = state
+            .slide_boundaries
+            .get(state.current_slide + 1)
+            .copied()
+            .unwrap_or(state.wrapped.len());
+        (start, end)
+    } else {
+        (0, state.wrapped.len())
+    };
+
     for row in 0..viewport {
         queue!(stdout, MoveTo(0, (row + 1) as u16))?;
 
         let line_idx = if state.slide_mode {
-            let start = state
-                .slide_boundaries
-                .get(state.current_slide)
-                .copied()
-                .unwrap_or(0);
-            start + row
+            slide_start + row
         } else {
             state.offset + row
         };
@@ -1810,7 +1821,7 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
         )?;
 
         let mut drew_inline_image = false;
-        if let Some(line) = state.wrapped.get(line_idx) {
+        if let Some(line) = state.wrapped.get(line_idx).filter(|_| line_idx < slide_end) {
             // Render image pixels inline (Kitty / iTerm2).
             // Suppressed when an overlay is active to prevent images bleeding through.
             if !suppress_images
@@ -1958,17 +1969,12 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
         let mut row = 0;
         while row < viewport {
             let line_idx = if state.slide_mode {
-                let start = state
-                    .slide_boundaries
-                    .get(state.current_slide)
-                    .copied()
-                    .unwrap_or(0);
-                start + row
+                slide_start + row
             } else {
                 state.offset + row
             };
 
-            if let Some(line) = state.wrapped.get(line_idx)
+            if let Some(line) = state.wrapped.get(line_idx).filter(|_| line_idx < slide_end)
                 && let LineMeta::Image {
                     ref url,
                     row: image_row,
@@ -1982,16 +1988,12 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
                 let mut count = 1;
                 while first_screen_row + count < viewport {
                     let next_idx = if state.slide_mode {
-                        let start = state
-                            .slide_boundaries
-                            .get(state.current_slide)
-                            .copied()
-                            .unwrap_or(0);
-                        start + first_screen_row + count
+                        slide_start + first_screen_row + count
                     } else {
                         state.offset + first_screen_row + count
                     };
-                    if let Some(next) = state.wrapped.get(next_idx) {
+                    if let Some(next) = state.wrapped.get(next_idx).filter(|_| next_idx < slide_end)
+                    {
                         if let LineMeta::Image { url: ref u2, .. } = next.meta
                             && *u2 == url
                         {
@@ -3371,6 +3373,82 @@ mod tests {
         let state = make_state_with_lines(vec![line(vec![span("only line", None)])]);
         // Row 2 maps to line index 1 which doesn't exist
         assert_eq!(state.link_at_position(2, 2), None);
+    }
+
+    // ── slide mode tests ───────────────────────────────────────────────────
+
+    fn make_slide_state(md: &str) -> ViewerState {
+        let (lines, _) = crate::markdown::render(md, 80, &crate::theme::Theme::dark(), false);
+        let wrapped = crate::style::wrap_lines(&lines, 80);
+        let opts = ViewerOptions {
+            files: vec![],
+            initial_content: md.to_string(),
+            filename: String::new(),
+            theme: crate::theme::Theme::dark(),
+            slide_mode: true,
+            follow_mode: false,
+            line_numbers: false,
+            width_override: None,
+        };
+        let mut state = ViewerState::new(opts, 80, 24);
+        state.wrapped = wrapped;
+        state.finalize_layout();
+        state
+    }
+
+    #[test]
+    fn slide_boundaries_built_for_two_slides() {
+        let state = make_slide_state("# Slide 1\n\n---\n\n# Slide 2\n");
+        // boundary[0] = 0 (start of slide 1), boundary[1] = line after the SlideBreak
+        assert_eq!(
+            state.slide_boundaries.len(),
+            2,
+            "expected 2 boundaries for 1 separator"
+        );
+        assert_eq!(state.slide_boundaries[0], 0);
+    }
+
+    #[test]
+    fn slide_boundaries_built_for_three_slides() {
+        let state = make_slide_state("# A\n\n---\n\n# B\n\n---\n\n# C\n");
+        assert_eq!(
+            state.slide_boundaries.len(),
+            3,
+            "expected 3 boundaries for 2 separators"
+        );
+    }
+
+    #[test]
+    fn slide_end_excludes_next_slide_content() {
+        // The fix: slide_end for slide 0 must be <= slide_boundaries[1],
+        // so content from slide 1 is not in range [slide_start..slide_end).
+        let state = make_slide_state(
+            "# Slide 1\n\nslide one content\n\n---\n\n# Slide 2\n\nslide two content\n",
+        );
+        let slide0_start = state.slide_boundaries[0];
+        let slide0_end = state.slide_boundaries[1]; // first line of slide 2
+
+        // Every line in [slide0_start..slide0_end) must not contain "slide two"
+        for i in slide0_start..slide0_end {
+            let text: String = state.wrapped[i]
+                .spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect();
+            assert!(
+                !text.contains("slide two"),
+                "line {i} is in slide 0's range but contains slide 2 content: {text:?}"
+            );
+        }
+
+        // Slide 2 content must be at or after slide0_end
+        let slide2_content_found = state.wrapped[slide0_end..]
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.text.contains("slide two")));
+        assert!(
+            slide2_content_found,
+            "slide 2 content not found after slide0_end"
+        );
     }
 
     #[test]
