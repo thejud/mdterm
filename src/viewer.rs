@@ -701,18 +701,26 @@ impl ViewerState {
             return None;
         }
         let content_col = term_col - Self::GUTTER_COLS;
-        let line_idx = if self.slide_mode {
+        let (line_idx, slide_end) = if self.slide_mode {
             let start = self
                 .slide_boundaries
                 .get(self.current_slide)
                 .copied()
                 .unwrap_or(0);
-            start + (term_row - 1)
+            let end = self
+                .slide_boundaries
+                .get(self.current_slide + 1)
+                .copied()
+                .unwrap_or(self.wrapped.len());
+            (start + (term_row - 1), end)
         } else {
-            self.offset + (term_row - 1)
+            (self.offset + (term_row - 1), self.wrapped.len())
         };
 
-        let line = self.wrapped.get(line_idx)?;
+        let line = self
+            .wrapped
+            .get(line_idx)
+            .filter(|_| line_idx < slide_end)?;
         let mut col = 0;
         for span in &line.spans {
             let span_len = UnicodeWidthStr::width(span.text.as_str());
@@ -3448,6 +3456,26 @@ mod tests {
         assert!(
             slide2_content_found,
             "slide 2 content not found after slide0_end"
+        );
+    }
+
+    #[test]
+    fn link_at_position_slide_mode_does_not_leak_next_slide_links() {
+        // Build a two-slide doc where slide 2 has a link but slide 1 does not.
+        // Clicking past slide 1's content should return None, not the slide 2 link.
+        let md = "no link here\n\n---\n\n[next slide link](https://slide2.com)\n";
+        let mut state = make_slide_state(md);
+        state.current_slide = 0;
+
+        // Row past all of slide 1's lines (but within terminal height) must not
+        // return the link that belongs to slide 2.
+        let slide0_end = state.slide_boundaries[1];
+        // Pick a row that would map to a line index >= slide0_end
+        let overflow_row = (slide0_end + 1) as usize; // term_row (1-based)
+        assert_eq!(
+            state.link_at_position(overflow_row, 2),
+            None,
+            "link from slide 2 must not be reachable while viewing slide 1"
         );
     }
 
